@@ -199,9 +199,17 @@ def _format_work(item: Dict) -> Dict[str, Any]:
     licenses = item.get("license", [])
     is_oa = any("creativecommons" in (lic.get("URL", "") or "") for lic in licenses)
 
+    # CrossRef abstracts are sometimes in JATS XML format — strip tags
+    abstract_raw = item.get("abstract", "")
+    if abstract_raw:
+        abstract = re.sub(r"<[^>]+>", "", abstract_raw).strip()
+    else:
+        abstract = ""
+
     return {
         "doi": doi,
         "title": title,
+        "abstract": abstract,
         "authors": authors,
         "year": year,
         "publication_date": pub_date,

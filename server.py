@@ -2,7 +2,7 @@
 Academic Research MCP Server
 
 A unified MCP server providing access to seven academic research APIs
-plus local caching and batch operations:
+plus Unpaywall PDF resolution, local caching, and batch operations:
 
   1. Google Scholar — keyword search, advanced search, author profiles
   2. ORCID — researcher profiles, publications, employment, education, funding
@@ -11,6 +11,7 @@ plus local caching and batch operations:
   5. medRxiv/bioRxiv — health sciences preprints, publication status tracking
   6. OpenAlex — 250M+ works, highest throughput, no auth needed
   7. CrossRef — DOI registry fallback, 50 req/sec, comprehensive metadata
+  8. Unpaywall — legal open access PDF resolution for any DOI
 
 Features:
   - Local SQLite cache to avoid redundant API calls
@@ -37,6 +38,7 @@ import arxiv_client
 import medrxiv_client
 import openalex_client as oalex
 import crossref_client as cr
+import unpaywall_client as unpaywall
 import cache
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -727,6 +729,49 @@ async def crossref_by_author(
         return await asyncio.to_thread(cr.search_by_author, author_name, query, num_results)
     except Exception as e:
         return [{"error": f"CrossRef author search failed: {str(e)}"}]
+
+
+
+
+# ============================================================================
+# UNPAYWALL / PDF RESOLUTION TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def find_paper_pdf(doi: str) -> Dict[str, Any]:
+    """
+    Find the best available legal PDF for a paper by DOI. Checks Unpaywall,
+    PubMed Central, preprint servers, and institutional repositories.
+
+    Returns the PDF URL if available, or the best alternative (publisher
+    landing page, preprint version). If no open access version exists,
+    suggests checking institutional access.
+
+    Args:
+        doi: DOI string (e.g., "10.1038/s41591-023-02437-x" or
+             "DOI:10.1016/j.gie.2023.06.056")
+    """
+    logging.info(f"PDF resolution: {doi}")
+    try:
+        return await asyncio.to_thread(unpaywall.get_paper_pdf, doi)
+    except Exception as e:
+        return {"error": f"PDF resolution failed: {str(e)}"}
+
+
+@mcp.tool()
+async def batch_check_open_access(dois: List[str]) -> List[Dict[str, Any]]:
+    """
+    Check open access status for multiple papers at once. Returns whether
+    each paper has a free PDF and where to find it.
+
+    Args:
+        dois: List of DOI strings (recommended max 50 per batch)
+    """
+    logging.info(f"Batch OA check: {len(dois)} DOIs")
+    try:
+        return await asyncio.to_thread(unpaywall.batch_check_oa, dois)
+    except Exception as e:
+        return [{"error": f"Batch OA check failed: {str(e)}"}]
 
 
 # ============================================================================

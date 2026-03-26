@@ -293,9 +293,21 @@ def _format_work(item: Dict) -> Dict[str, Any]:
     oa = item.get("open_access", {}) or {}
     biblio = item.get("biblio", {}) or {}
 
+    # Reconstruct abstract from inverted index (OpenAlex stores abstracts this way)
+    abstract = ""
+    aii = item.get("abstract_inverted_index", {}) or {}
+    if aii:
+        positions = {}
+        for word, pos_list in aii.items():
+            for pos in pos_list:
+                positions[pos] = word
+        if positions:
+            abstract = " ".join(positions[i] for i in sorted(positions.keys()))
+
     return {
         "openalex_id": item.get("id", ""),
         "title": item.get("title", ""),
+        "abstract": abstract,
         "authors": authors,
         "year": item.get("publication_year"),
         "publication_date": item.get("publication_date", ""),

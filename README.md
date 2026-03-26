@@ -1,6 +1,6 @@
 # Academic Research MCP Server
 
-A unified [Model Context Protocol](https://modelcontextprotocol.io/) server that provides AI assistants with access to seven academic research APIs through **35 tools**, plus local caching and batch operations. Designed for biomedical researchers who work across clinical medicine and computer science.
+A unified [Model Context Protocol](https://modelcontextprotocol.io/) server that provides AI assistants with access to seven academic research APIs through **37 tools**, plus local caching and batch operations. Designed for biomedical researchers who work across clinical medicine and computer science.
 
 ## APIs & Tools
 
@@ -13,6 +13,7 @@ A unified [Model Context Protocol](https://modelcontextprotocol.io/) server that
 | **medRxiv/bioRxiv** | 5 | None | Reasonable use | Preprint search, date-range browsing, publication status tracking |
 | **OpenAlex** | 6 | None | 10/sec (polite pool) | 250M+ works, authors, institutions — highest throughput |
 | **CrossRef** | 3 | None | 50/sec (polite pool) | DOI registry fallback, author search, citation counts |
+| **Unpaywall** | 2 | None | 100K/day | Legal open access PDF resolution for any DOI |
 | **Cache** | 2 | N/A | N/A | Local SQLite cache stats and management |
 
 No API keys required. Optional environment variables for higher throughput:
@@ -55,7 +56,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Restart Claude Desktop after saving.
 
-## All 35 Tools
+## All 37 Tools
 
 ### Google Scholar
 - `google_scholar_search_keywords` — Search by keywords
@@ -104,9 +105,17 @@ Restart Claude Desktop after saving.
 - `crossref_doi` — Authoritative DOI metadata lookup
 - `crossref_by_author` — Works by author with optional topic filter
 
+### Unpaywall (PDF Resolution)
+- `find_paper_pdf` — **Resolve best legal PDF for any DOI** (checks Unpaywall, PMC, preprints, repositories)
+- `batch_check_open_access` — Check OA status for multiple DOIs at once
+
 ### Cache Management
 - `cache_stats` — View cache health: entries, size, categories
 - `cache_clear` — Clear cache (all or by category)
+
+## Abstracts
+
+All search tools return abstracts where available. Semantic Scholar, arXiv, and medRxiv return full abstracts directly. OpenAlex reconstructs abstracts from its inverted index format. CrossRef returns abstracts when publishers deposit them (coverage varies). Use abstract content to assess relevance before fetching full papers.
 
 ## When to Use Which Source
 
@@ -120,6 +129,7 @@ Restart Claude Desktop after saving.
 | **medRxiv/bioRxiv** | Health sciences preprints, tracking publication status |
 | **Google Scholar** | Catch-all, books, theses, non-indexed sources |
 | **ORCID** | Researcher profiles, collaborator lookup, publication lists |
+| **Unpaywall** | Finding legal free PDFs, checking OA status before paywall |
 
 ### Throughput Strategy
 
