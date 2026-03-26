@@ -1,6 +1,6 @@
 # Academic Research MCP Server
 
-A unified [Model Context Protocol](https://modelcontextprotocol.io/) server that provides AI assistants with access to seven academic research APIs through **36 tools**, plus local caching and batch operations. Designed for biomedical researchers who work across clinical medicine and computer science.
+A unified [Model Context Protocol](https://modelcontextprotocol.io/) server that provides AI assistants with access to seven academic research APIs through **35 tools**, plus local caching and batch operations. Designed for biomedical researchers who work across clinical medicine and computer science.
 
 ## APIs & Tools
 
@@ -55,7 +55,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Restart Claude Desktop after saving.
 
-## All 36 Tools
+## All 35 Tools
 
 ### Google Scholar
 - `google_scholar_search_keywords` — Search by keywords
