@@ -1,14 +1,26 @@
 """
 Academic Research MCP Server
 
-A unified MCP server providing access to five academic research APIs:
+A unified MCP server providing access to seven academic research APIs
+plus local caching and batch operations:
+
   1. Google Scholar — keyword search, advanced search, author profiles
   2. ORCID — researcher profiles, publications, employment, education, funding
-  3. Semantic Scholar — paper search, citation graphs, author metrics, recommendations
+  3. Semantic Scholar — paper search, citation graphs, author metrics, recommendations, batch lookup
   4. arXiv — CS/ML preprints, search by author/title/category, full metadata
   5. medRxiv/bioRxiv — health sciences preprints, publication status tracking
+  6. OpenAlex — 250M+ works, highest throughput, no auth needed
+  7. CrossRef — DOI registry fallback, 50 req/sec, comprehensive metadata
 
-No API keys required for basic use. Set S2_API_KEY for higher Semantic Scholar rate limits.
+Features:
+  - Local SQLite cache to avoid redundant API calls
+  - S2 batch endpoint for up to 500 papers in one request
+  - CrossRef fallback when other APIs are rate-limited
+
+No API keys required for basic use. Optional env vars:
+  - S2_API_KEY: Higher Semantic Scholar rate limits
+  - OPENALEX_EMAIL: OpenAlex polite pool (10 req/sec vs 1 req/sec)
+  - CROSSREF_EMAIL: CrossRef polite pool (50 req/sec)
 """
 
 from typing import Any, Dict, List, Optional
@@ -23,6 +35,9 @@ import orcid_client
 import semantic_scholar_client as s2
 import arxiv_client
 import medrxiv_client
+import openalex_client as oalex
+import crossref_client as cr
+import cache
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -325,6 +340,26 @@ async def s2_recommend_papers(paper_id: str, num_results: int = 10) -> List[Dict
         return [{"error": f"Semantic Scholar recommendations failed: {str(e)}"}]
 
 
+@mcp.tool()
+async def s2_batch_papers(paper_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+    """
+    Get details for up to 500 papers in a single request. Dramatically faster
+    than individual lookups when processing reference lists, citation sets, or
+    systematic review results.
+
+    Accepts any mix of identifiers: S2 IDs, DOIs (prefix "DOI:"),
+    PMIDs (prefix "PMID:"), or ArXiv IDs.
+
+    Args:
+        paper_ids: List of paper identifiers (max 500)
+    """
+    logging.info(f"S2 batch lookup: {len(paper_ids)} papers")
+    try:
+        return await asyncio.to_thread(s2.batch_get_papers, paper_ids)
+    except Exception as e:
+        return [{"error": f"Semantic Scholar batch lookup failed: {str(e)}"}]
+
+
 # ============================================================================
 # ARXIV TOOLS
 # ============================================================================
@@ -505,6 +540,227 @@ async def medrxiv_recent_by_category(
         )
     except Exception as e:
         return [{"error": f"{server} category search failed: {str(e)}"}]
+
+
+# ============================================================================
+# OPENALEX TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def openalex_search(
+    query: str,
+    num_results: int = 10,
+    year: Optional[str] = None,
+    open_access_only: bool = False,
+    sort_by: str = "relevance_score",
+) -> List[Dict[str, Any]]:
+    """
+    Search OpenAlex for works. Covers 250M+ works with no rate limit concerns.
+    Best choice for high-volume searches or when other APIs are throttled.
+
+    Args:
+        query: Search query
+        num_results: Number of results (default: 10, max: 200)
+        year: Year filter (e.g., "2023", "2020-2025", ">2022")
+        open_access_only: Only return open-access works
+        sort_by: "relevance_score", "cited_by_count", or "publication_date"
+    """
+    logging.info(f"OpenAlex search: {query}")
+    try:
+        return await asyncio.to_thread(
+            oalex.search_works, query, num_results, year, open_access_only, sort_by
+        )
+    except Exception as e:
+        return [{"error": f"OpenAlex search failed: {str(e)}"}]
+
+
+@mcp.tool()
+async def openalex_work(work_id: str) -> Dict[str, Any]:
+    """
+    Get details for a specific work from OpenAlex. Accepts OpenAlex ID,
+    DOI, or PMID.
+
+    Args:
+        work_id: OpenAlex ID (e.g., "W2741809807"), DOI (e.g., "10.1038/s41591-023-02437-x"),
+                 or PMID (e.g., "pmid:37890456")
+    """
+    logging.info(f"OpenAlex work: {work_id}")
+    try:
+        return await asyncio.to_thread(oalex.get_work, work_id)
+    except Exception as e:
+        return {"error": f"OpenAlex work lookup failed: {str(e)}"}
+
+
+@mcp.tool()
+async def openalex_search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+    """
+    Search for authors on OpenAlex. Returns name, affiliations, works count,
+    citation count, and h-index.
+
+    Args:
+        query: Author name
+        num_results: Number of results (default: 5)
+    """
+    logging.info(f"OpenAlex author search: {query}")
+    try:
+        return await asyncio.to_thread(oalex.search_authors, query, num_results)
+    except Exception as e:
+        return [{"error": f"OpenAlex author search failed: {str(e)}"}]
+
+
+@mcp.tool()
+async def openalex_author(author_id: str) -> Dict[str, Any]:
+    """
+    Get detailed author profile from OpenAlex: h-index, citation count,
+    research topics, and ORCID.
+
+    Args:
+        author_id: OpenAlex author ID (e.g., "A5023888391") or ORCID
+    """
+    logging.info(f"OpenAlex author: {author_id}")
+    try:
+        return await asyncio.to_thread(oalex.get_author, author_id)
+    except Exception as e:
+        return {"error": f"OpenAlex author lookup failed: {str(e)}"}
+
+
+@mcp.tool()
+async def openalex_author_works(
+    author_id: str,
+    num_results: int = 20,
+    sort_by: str = "publication_date",
+) -> List[Dict[str, Any]]:
+    """
+    Get works by a specific author from OpenAlex.
+
+    Args:
+        author_id: OpenAlex author ID or ORCID
+        num_results: Number of works (default: 20)
+        sort_by: "publication_date" or "cited_by_count"
+    """
+    logging.info(f"OpenAlex author works: {author_id}")
+    try:
+        return await asyncio.to_thread(oalex.get_author_works, author_id, num_results, sort_by)
+    except Exception as e:
+        return [{"error": f"OpenAlex author works failed: {str(e)}"}]
+
+
+@mcp.tool()
+async def openalex_institution(institution_id: str) -> Dict[str, Any]:
+    """
+    Get institution details from OpenAlex: name, country, type, works count.
+
+    Args:
+        institution_id: OpenAlex institution ID or ROR ID
+    """
+    logging.info(f"OpenAlex institution: {institution_id}")
+    try:
+        return await asyncio.to_thread(oalex.get_institution, institution_id)
+    except Exception as e:
+        return {"error": f"OpenAlex institution lookup failed: {str(e)}"}
+
+
+# ============================================================================
+# CROSSREF TOOLS (Web Search Fallback)
+# ============================================================================
+
+@mcp.tool()
+async def crossref_search(
+    query: str,
+    num_results: int = 10,
+    year: Optional[str] = None,
+    sort: str = "relevance",
+    type_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Search CrossRef for works. CrossRef is the DOI registry covering 150M+ works
+    with very high rate limits (50 req/sec). Use as a fallback when Semantic Scholar
+    or Google Scholar are rate-limited, or when you need fast, high-volume lookups.
+
+    Args:
+        query: Search query
+        num_results: Number of results (default: 10, max: 100)
+        year: Year or range (e.g., "2023", "2020-2025")
+        sort: "relevance", "published", or "is-referenced-by-count"
+        type_filter: Filter by type (e.g., "journal-article", "proceedings-article",
+                     "posted-content" for preprints)
+    """
+    logging.info(f"CrossRef search: {query}")
+    try:
+        return await asyncio.to_thread(cr.search_works, query, num_results, year, sort, type_filter)
+    except Exception as e:
+        return [{"error": f"CrossRef search failed: {str(e)}"}]
+
+
+@mcp.tool()
+async def crossref_doi(doi: str) -> Dict[str, Any]:
+    """
+    Get metadata for a work by DOI from CrossRef. The authoritative source
+    for DOI metadata.
+
+    Args:
+        doi: DOI string (e.g., "10.1038/s41591-023-02437-x")
+    """
+    logging.info(f"CrossRef DOI lookup: {doi}")
+    try:
+        return await asyncio.to_thread(cr.get_work_by_doi, doi)
+    except Exception as e:
+        return {"error": f"CrossRef DOI lookup failed: {str(e)}"}
+
+
+@mcp.tool()
+async def crossref_by_author(
+    author_name: str,
+    query: Optional[str] = None,
+    num_results: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Search CrossRef for works by a specific author, optionally filtered by topic.
+
+    Args:
+        author_name: Author name
+        query: Optional additional search terms
+        num_results: Number of results (default: 20)
+    """
+    logging.info(f"CrossRef author search: {author_name}")
+    try:
+        return await asyncio.to_thread(cr.search_by_author, author_name, query, num_results)
+    except Exception as e:
+        return [{"error": f"CrossRef author search failed: {str(e)}"}]
+
+
+# ============================================================================
+# CACHE MANAGEMENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def cache_stats() -> Dict[str, Any]:
+    """
+    Get cache statistics: total entries, active vs expired, size on disk,
+    and breakdown by category. Useful for monitoring cache health.
+    """
+    logging.info("Cache stats requested")
+    try:
+        return await asyncio.to_thread(cache.stats)
+    except Exception as e:
+        return {"error": f"Cache stats failed: {str(e)}"}
+
+
+@mcp.tool()
+async def cache_clear(category: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Clear the local cache. Optionally clear only a specific category.
+
+    Args:
+        category: Category to clear (e.g., "search", "paper", "author").
+                  If omitted, clears everything.
+    """
+    logging.info(f"Cache clear: category={category}")
+    try:
+        count = await asyncio.to_thread(cache.clear, category)
+        return {"cleared": count, "category": category or "all"}
+    except Exception as e:
+        return {"error": f"Cache clear failed: {str(e)}"}
 
 
 # ============================================================================

@@ -308,3 +308,49 @@ def _format_paper(item: Dict) -> Dict[str, Any]:
         "open_access_url": oa_pdf.get("url", ""),
         "s2_url": f"https://www.semanticscholar.org/paper/{item.get('paperId', '')}",
     }
+
+
+def batch_get_papers(
+    paper_ids: List[str],
+    fields: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Get details for up to 500 papers in a single request.
+    This is dramatically more efficient than individual lookups.
+
+    Parameters:
+        paper_ids: List of paper identifiers (S2 IDs, DOIs with "DOI:" prefix,
+                   PMIDs with "PMID:" prefix, ArXiv IDs, or URLs). Max 500.
+        fields: Comma-separated fields to return. Defaults to standard set.
+
+    Returns:
+        List of paper dicts (order matches input; None for IDs not found).
+    """
+    url = f"{S2_API_BASE}/paper/batch"
+    if fields is None:
+        fields = ("title,authors,year,citationCount,abstract,externalIds,venue,"
+                  "openAccessPdf,publicationTypes,journal,influentialCitationCount")
+
+    params = {"fields": fields}
+
+    # Chunk into batches of 500
+    results = []
+    for i in range(0, len(paper_ids), 500):
+        chunk = paper_ids[i:i + 500]
+        resp = requests.post(
+            url,
+            headers=_headers(),
+            params=params,
+            json={"ids": chunk},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        batch = resp.json()
+
+        for item in batch:
+            if item is None:
+                results.append(None)
+            else:
+                results.append(_format_paper(item))
+
+    return results
