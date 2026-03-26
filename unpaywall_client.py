@@ -9,13 +9,11 @@ No API key required — just an email address. Uses the same OPENALEX_EMAIL env 
 Rate limit: 100,000 requests/day.
 """
 
-import os
 import re
-import requests
 from typing import Any, Dict, List, Optional
+import http_client
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
-UNPAYWALL_EMAIL = os.environ.get("OPENALEX_EMAIL", os.environ.get("CROSSREF_EMAIL", ""))
 
 
 def get_paper_pdf(doi: str) -> Dict[str, Any]:
@@ -38,14 +36,15 @@ def get_paper_pdf(doi: str) -> Dict[str, Any]:
     if not doi:
         return {"error": "Invalid DOI format"}
 
-    if not UNPAYWALL_EMAIL:
+    email = http_client.get_env("OPENALEX_EMAIL", http_client.get_env("CROSSREF_EMAIL"))
+    if not email:
         return {"error": "No email configured. Set OPENALEX_EMAIL environment variable."}
 
     url = f"{UNPAYWALL_BASE}/{doi}"
-    params = {"email": UNPAYWALL_EMAIL}
+    params = {"email": email}
 
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        resp = http_client.get(url, params=params)
     except Exception as e:
         return {"error": f"Unpaywall request failed: {str(e)}"}
 

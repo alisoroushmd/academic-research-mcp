@@ -8,19 +8,20 @@ making it the ideal fallback when other APIs are throttled.
 No API key required. Set CROSSREF_EMAIL for polite pool access (faster responses).
 """
 
-import os
-import requests
+import re
 from typing import Any, Dict, List, Optional
+import http_client
+import cache
 
 CROSSREF_BASE = "https://api.crossref.org"
-CROSSREF_EMAIL = os.environ.get("CROSSREF_EMAIL", os.environ.get("OPENALEX_EMAIL", ""))
 
 
 def _headers() -> Dict[str, str]:
     """Build headers with polite pool mailto if available."""
     h = {"Accept": "application/json"}
-    if CROSSREF_EMAIL:
-        h["User-Agent"] = f"academic-research-mcp/1.0 (mailto:{CROSSREF_EMAIL})"
+    email = http_client.get_env("CROSSREF_EMAIL", http_client.get_env("OPENALEX_EMAIL"))
+    if email:
+        h["User-Agent"] = f"academic-research-mcp/1.0 (mailto:{email})"
     return h
 
 
@@ -75,7 +76,7 @@ def search_works(
     # Remove None values
     params = {k: v for k, v in params.items() if v is not None}
 
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -97,7 +98,7 @@ def get_work_by_doi(doi: str) -> Dict[str, Any]:
     doi = doi.replace("https://doi.org/", "").replace("DOI:", "").strip()
 
     url = f"{CROSSREF_BASE}/works/{doi}"
-    resp = requests.get(url, headers=_headers(), timeout=15)
+    resp = http_client.get(url, headers=_headers())
     resp.raise_for_status()
     data = resp.json()
 
@@ -130,7 +131,7 @@ def search_by_author(
     if query:
         params["query"] = query
 
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -150,7 +151,7 @@ def get_citation_count(doi: str) -> Dict[str, Any]:
     """
     doi = doi.replace("https://doi.org/", "").replace("DOI:", "").strip()
     url = f"{CROSSREF_BASE}/works/{doi}"
-    resp = requests.get(url, headers=_headers(), timeout=15)
+    resp = http_client.get(url, headers=_headers())
     resp.raise_for_status()
     data = resp.json().get("message", {})
 

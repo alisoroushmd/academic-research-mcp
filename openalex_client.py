@@ -9,18 +9,18 @@ Rate limits: Generous — 10 requests/second for polite pool, 1/sec without.
 This is the highest-throughput academic API available.
 """
 
-import os
-import requests
 from typing import Any, Dict, List, Optional
+import http_client
+import cache
 
 OPENALEX_BASE = "https://api.openalex.org"
-OPENALEX_EMAIL = os.environ.get("OPENALEX_EMAIL", "")
 
 
 def _params_with_email(params: Dict) -> Dict:
     """Add mailto parameter for polite pool if email is configured."""
-    if OPENALEX_EMAIL:
-        params["mailto"] = OPENALEX_EMAIL
+    email = http_client.get_env("OPENALEX_EMAIL")
+    if email:
+        params["mailto"] = email
     return params
 
 
@@ -73,7 +73,7 @@ def search_works(
     if filters:
         params["filter"] = ",".join(filters)
 
-    resp = requests.get(url, params=params, timeout=15)
+    resp = http_client.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -99,7 +99,7 @@ def get_work(work_id: str) -> Dict[str, Any]:
 
     url = f"{OPENALEX_BASE}/works/{work_id}"
     params = _params_with_email({})
-    resp = requests.get(url, params=params, timeout=15)
+    resp = http_client.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -142,7 +142,7 @@ def search_authors(
         "search": query,
         "per_page": min(num_results, 200),
     })
-    resp = requests.get(url, params=params, timeout=15)
+    resp = http_client.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -185,7 +185,7 @@ def get_author(author_id: str) -> Dict[str, Any]:
 
     url = f"{OPENALEX_BASE}/authors/{author_id}"
     params = _params_with_email({})
-    resp = requests.get(url, params=params, timeout=15)
+    resp = http_client.get(url, params=params)
     resp.raise_for_status()
     a = resp.json()
 
@@ -242,7 +242,7 @@ def get_author_works(
         "per_page": min(num_results, 200),
         "sort": f"{sort_by}:desc" if sort_by == "relevance_score" else f"{sort_by}:desc",
     })
-    resp = requests.get(url, params=params, timeout=15)
+    resp = http_client.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -261,7 +261,7 @@ def get_institution(institution_id: str) -> Dict[str, Any]:
     """
     url = f"{OPENALEX_BASE}/institutions/{institution_id}"
     params = _params_with_email({})
-    resp = requests.get(url, params=params, timeout=15)
+    resp = http_client.get(url, params=params)
     resp.raise_for_status()
     i = resp.json()
 

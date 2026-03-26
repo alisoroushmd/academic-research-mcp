@@ -1,5 +1,5 @@
-import requests
 from bs4 import BeautifulSoup
+import http_client
 from scholarly import scholarly
 
 
@@ -19,7 +19,7 @@ def google_scholar_search(query, num_results=5):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    response = requests.get(search_url, headers=headers)
+    response = http_client.get(search_url, headers=headers)
     if response.status_code != 200:
         return []
 
@@ -75,7 +75,7 @@ def advanced_google_scholar_search(query, author=None, year_range=None, num_resu
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    response = requests.get(search_url, headers=headers)
+    response = http_client.get(search_url, headers=headers)
     if response.status_code != 200:
         return []
 

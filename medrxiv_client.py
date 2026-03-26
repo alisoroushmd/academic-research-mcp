@@ -9,8 +9,8 @@ publication status (whether a preprint has been published in a journal),
 and version history.
 """
 
-import requests
 from typing import Any, Dict, List, Optional
+import http_client
 
 MEDRXIV_API = "https://api.medrxiv.org"
 BIORXIV_API = "https://api.biorxiv.org"
@@ -42,7 +42,7 @@ def search_medrxiv(
 
     # Search published articles that match the query
     url = f"{base}/pubs/{server}/{query}/na/json"
-    resp = requests.get(url, timeout=15)
+    resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
 
@@ -74,7 +74,7 @@ def search_medrxiv_by_date(
     base = MEDRXIV_API if server == "medrxiv" else BIORXIV_API
     url = f"{base}/details/{server}/{start_date}/{end_date}/0/json"
 
-    resp = requests.get(url, timeout=15)
+    resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
 
@@ -99,7 +99,7 @@ def get_medrxiv_preprint(doi: str) -> Dict[str, Any]:
     doi = _clean_doi(doi)
 
     url = f"{MEDRXIV_API}/details/{doi}/json"
-    resp = requests.get(url, timeout=15)
+    resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
 
@@ -141,7 +141,7 @@ def get_publication_status(doi: str) -> Dict[str, Any]:
     doi = _clean_doi(doi)
 
     url = f"{MEDRXIV_API}/publisher/doi/{doi}/json"
-    resp = requests.get(url, timeout=15)
+    resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
 
@@ -193,7 +193,7 @@ def get_recent_by_category(
     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
     url = f"{base}/details/{server}/{start_date}/{end_date}/0/json"
-    resp = requests.get(url, timeout=15)
+    resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
 

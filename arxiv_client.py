@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
-import requests
+import http_client
 
 ARXIV_API_BASE = "http://export.arxiv.org/api/query"
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -80,7 +80,7 @@ def search_arxiv(
     }
 
     _throttle()
-    resp = requests.get(ARXIV_API_BASE, params=params, timeout=30)
+    resp = http_client.get(ARXIV_API_BASE, params=params, timeout=30)
     resp.raise_for_status()
 
     return _parse_feed(resp.text)
@@ -106,7 +106,7 @@ def get_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
     }
 
     _throttle()
-    resp = requests.get(ARXIV_API_BASE, params=params, timeout=30)
+    resp = http_client.get(ARXIV_API_BASE, params=params, timeout=30)
     resp.raise_for_status()
 
     papers = _parse_feed(resp.text)
@@ -142,7 +142,7 @@ def get_arxiv_by_author(
     }
 
     _throttle()
-    resp = requests.get(ARXIV_API_BASE, params=params, timeout=30)
+    resp = http_client.get(ARXIV_API_BASE, params=params, timeout=30)
     resp.raise_for_status()
 
     return _parse_feed(resp.text)

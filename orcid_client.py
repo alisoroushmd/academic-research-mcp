@@ -7,8 +7,9 @@ data about researchers including employment history, publications, funding,
 and education.
 """
 
-import requests
 from typing import Any, Dict, List, Optional
+import http_client
+import cache
 
 ORCID_API_BASE = "https://pub.orcid.org/v3.0"
 HEADERS = {"Accept": "application/json"}
@@ -27,7 +28,7 @@ def search_orcid(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
     """
     url = f"{ORCID_API_BASE}/search/"
     params = {"q": query, "rows": num_results}
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+    resp = http_client.get(url, headers=HEADERS, params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -53,7 +54,7 @@ def get_orcid_profile(orcid_id: str) -> Dict[str, Any]:
         external identifiers, and biography.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/person"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     person = resp.json()
 
@@ -92,7 +93,7 @@ def get_orcid_works(orcid_id: str, max_works: int = 20) -> List[Dict[str, Any]]:
         List of dicts with title, journal, year, doi, type, and external_ids.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/works"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
 
@@ -150,7 +151,7 @@ def get_orcid_employments(orcid_id: str) -> List[Dict[str, Any]]:
         List of dicts with organization, department, role, start_date, end_date.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/employments"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
 
@@ -184,7 +185,7 @@ def get_orcid_education(orcid_id: str) -> List[Dict[str, Any]]:
         List of dicts with organization, department, role, start_date, end_date.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/educations"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
 
@@ -218,7 +219,7 @@ def get_orcid_funding(orcid_id: str) -> List[Dict[str, Any]]:
         List of dicts with title, funder, type, start_date, end_date, grant_number.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/fundings"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
 
@@ -256,7 +257,7 @@ def _get_minimal_profile(orcid_id: str) -> Dict[str, Any]:
     """Fetch just name and current affiliation for search results."""
     url = f"{ORCID_API_BASE}/{orcid_id}/person"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = http_client.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         person = resp.json()
 

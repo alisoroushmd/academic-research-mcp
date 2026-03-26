@@ -9,19 +9,19 @@ for higher rate limits (1 request/second with key).
 Set the environment variable S2_API_KEY to use an API key.
 """
 
-import os
-import requests
 from typing import Any, Dict, List, Optional
+import http_client
+import cache
 
 S2_API_BASE = "https://api.semanticscholar.org/graph/v1"
-S2_API_KEY = os.environ.get("S2_API_KEY", "")
 
 
 def _headers() -> Dict[str, str]:
     """Build request headers, including API key if available."""
     h = {"Accept": "application/json"}
-    if S2_API_KEY:
-        h["x-api-key"] = S2_API_KEY
+    key = http_client.get_env("S2_API_KEY")
+    if key:
+        h["x-api-key"] = key
     return h
 
 
@@ -60,13 +60,17 @@ def search_papers(
     if open_access_only:
         params["openAccessPdf"] = ""
 
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    key = cache._cache_key("s2_search", query, num_results, year, fields_of_study, open_access_only)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
-    papers = []
-    for item in data.get("data", []):
-        papers.append(_format_paper(item))
+    papers = [_format_paper(item) for item in data.get("data", [])]
+    cache.put(key, papers, category="search", ttl=cache.SEARCH_TTL)
     return papers
 
 
@@ -87,7 +91,12 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
                   "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
                   "references,citations,tldr,embedding"
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    key = cache._cache_key("s2_paper", paper_id)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -112,6 +121,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
         for c in cites[:20]
     ]
 
+    cache.put(key, paper, category="paper", ttl=cache.PAPER_TTL)
     return paper
 
 
@@ -131,7 +141,7 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -157,7 +167,7 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -182,7 +192,7 @@ def get_author_details(author_id: str) -> Dict[str, Any]:
     params = {
         "fields": "name,affiliations,homepage,paperCount,citationCount,hIndex",
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -217,7 +227,7 @@ def search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
         "limit": min(num_results, 100),
         "fields": "name,affiliations,paperCount,citationCount,hIndex",
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -253,7 +263,7 @@ def get_author_papers(
         "limit": min(num_results, 100),
         "fields": "title,year,citationCount,venue,externalIds,influentialCitationCount",
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -276,7 +286,7 @@ def get_recommended_papers(paper_id: str, num_results: int = 10) -> List[Dict[st
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds,abstract",
     }
-    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
+    resp = http_client.get(url, headers=_headers(), params=params)
     resp.raise_for_status()
     data = resp.json()
 
@@ -337,12 +347,11 @@ def batch_get_papers(
     results = []
     for i in range(0, len(paper_ids), 500):
         chunk = paper_ids[i:i + 500]
-        resp = requests.post(
+        resp = http_client.post(
             url,
             headers=_headers(),
             params=params,
             json={"ids": chunk},
-            timeout=30,
         )
         resp.raise_for_status()
         batch = resp.json()
