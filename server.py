@@ -43,6 +43,67 @@ import cache
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
+# ============================================================================
+# TOKEN OPTIMIZATION: Compact output mode
+# ============================================================================
+
+def _compact_paper(paper: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Strip a paper result to essential fields for minimal token usage.
+    Reduces output by ~60-70% compared to full results.
+    """
+    # Truncate abstract to 150 chars
+    abstract = paper.get("abstract", "") or ""
+    if len(abstract) > 150:
+        abstract = abstract[:150].rsplit(" ", 1)[0] + "..."
+
+    # Truncate authors to first 3
+    authors = paper.get("authors", [])
+    if isinstance(authors, str):
+        authors_short = authors[:100] + ("..." if len(authors) > 100 else "")
+    elif isinstance(authors, list):
+        if len(authors) > 3:
+            authors_short = authors[:3] + [f"+{len(authors)-3} more"]
+        else:
+            authors_short = authors
+    else:
+        authors_short = authors
+
+    compact = {
+        "title": paper.get("title", ""),
+        "authors": authors_short,
+        "year": paper.get("year") or paper.get("publication_year"),
+        "cited_by": paper.get("citation_count") or paper.get("cited_by_count") or paper.get("citedby", 0),
+        "doi": paper.get("doi", ""),
+    }
+
+    # Only include abstract snippet if it exists
+    if abstract:
+        compact["abstract_snippet"] = abstract
+
+    # Include OA URL if available
+    oa_url = paper.get("open_access_url") or paper.get("pdf_url", "")
+    if oa_url:
+        compact["pdf_url"] = oa_url
+
+    return compact
+
+
+def _compact_list(papers: list, brief: bool) -> list:
+    """Apply compact mode to a list of papers if brief=True."""
+    if not brief:
+        return papers
+    return [_compact_paper(p) if isinstance(p, dict) and "error" not in p else p for p in papers]
+
+
+def _compact_single(paper: dict, brief: bool) -> dict:
+    """Apply compact mode to a single paper if brief=True."""
+    if not brief or not isinstance(paper, dict) or "error" in paper:
+        return paper
+    return _compact_paper(paper)
+
+
 mcp = FastMCP("academic-research")
 
 
@@ -203,6 +264,7 @@ async def s2_search_papers(
     year: Optional[str] = None,
     fields_of_study: Optional[List[str]] = None,
     open_access_only: bool = False,
+    brief: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Search Semantic Scholar for papers. Returns titles, authors, citations,
@@ -215,18 +277,20 @@ async def s2_search_papers(
         year: Year filter (e.g., "2020-2025", "2023-", "-2020")
         fields_of_study: Filter by field (e.g., ["Medicine", "Computer Science"])
         open_access_only: Only return open-access papers
+        brief: Return compact results to save tokens (default: True). Set False for full metadata.
     """
     logging.info(f"S2 paper search: {query}")
     try:
-        return await asyncio.to_thread(
+        results = await asyncio.to_thread(
             s2.search_papers, query, num_results, year, fields_of_study, open_access_only
         )
+        return _compact_list(results, brief)
     except Exception as e:
         return [{"error": f"Semantic Scholar search failed: {str(e)}"}]
 
 
 @mcp.tool()
-async def s2_paper_details(paper_id: str) -> Dict[str, Any]:
+async def s2_paper_details(paper_id: str, brief: bool = False) -> Dict[str, Any]:
     """
     Get full details for a paper: abstract, TLDR, references, citations, and metadata.
     Accepts Semantic Scholar ID, DOI (prefix with "DOI:"), PMID (prefix with "PMID:"),
@@ -234,6 +298,7 @@ async def s2_paper_details(paper_id: str) -> Dict[str, Any]:
 
     Args:
         paper_id: Paper identifier (e.g., "DOI:10.1038/s41591-023-02437-x" or "PMID:37890456")
+        brief: Return compact results (default: False for detail lookups)
     """
     logging.info(f"S2 paper details: {paper_id}")
     try:
@@ -372,6 +437,7 @@ async def arxiv_search(
     num_results: int = 10,
     sort_by: str = "relevance",
     category: Optional[str] = None,
+    brief: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Search arXiv for papers. Best for CS, ML, and quantitative biology preprints.
@@ -388,9 +454,10 @@ async def arxiv_search(
     """
     logging.info(f"arXiv search: {query}, category={category}")
     try:
-        return await asyncio.to_thread(
+        results = await asyncio.to_thread(
             arxiv_client.search_arxiv, query, num_results, sort_by, category
         )
+        return _compact_list(results, brief)
     except Exception as e:
         return [{"error": f"arXiv search failed: {str(e)}"}]
 
@@ -443,6 +510,7 @@ async def medrxiv_search(
     query: str,
     num_results: int = 10,
     server: str = "medrxiv",
+    brief: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Search medRxiv or bioRxiv for preprints.
@@ -454,9 +522,10 @@ async def medrxiv_search(
     """
     logging.info(f"{server} search: {query}")
     try:
-        return await asyncio.to_thread(
+        results = await asyncio.to_thread(
             medrxiv_client.search_medrxiv, query, num_results, server
         )
+        return _compact_list(results, brief)
     except Exception as e:
         return [{"error": f"{server} search failed: {str(e)}"}]
 
@@ -555,6 +624,7 @@ async def openalex_search(
     year: Optional[str] = None,
     open_access_only: bool = False,
     sort_by: str = "relevance_score",
+    brief: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Search OpenAlex for works. Covers 250M+ works with no rate limit concerns.
@@ -566,12 +636,14 @@ async def openalex_search(
         year: Year filter (e.g., "2023", "2020-2025", ">2022")
         open_access_only: Only return open-access works
         sort_by: "relevance_score", "cited_by_count", or "publication_date"
+        brief: Return compact results to save tokens (default: True)
     """
     logging.info(f"OpenAlex search: {query}")
     try:
-        return await asyncio.to_thread(
+        results = await asyncio.to_thread(
             oalex.search_works, query, num_results, year, open_access_only, sort_by
         )
+        return _compact_list(results, brief)
     except Exception as e:
         return [{"error": f"OpenAlex search failed: {str(e)}"}]
 
@@ -673,6 +745,7 @@ async def crossref_search(
     year: Optional[str] = None,
     sort: str = "relevance",
     type_filter: Optional[str] = None,
+    brief: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Search CrossRef for works. CrossRef is the DOI registry covering 150M+ works
@@ -686,10 +759,12 @@ async def crossref_search(
         sort: "relevance", "published", or "is-referenced-by-count"
         type_filter: Filter by type (e.g., "journal-article", "proceedings-article",
                      "posted-content" for preprints)
+        brief: Return compact results to save tokens (default: True)
     """
     logging.info(f"CrossRef search: {query}")
     try:
-        return await asyncio.to_thread(cr.search_works, query, num_results, year, sort, type_filter)
+        results = await asyncio.to_thread(cr.search_works, query, num_results, year, sort, type_filter)
+        return _compact_list(results, brief)
     except Exception as e:
         return [{"error": f"CrossRef search failed: {str(e)}"}]
 
@@ -738,7 +813,7 @@ async def crossref_by_author(
 # ============================================================================
 
 @mcp.tool()
-async def find_paper_pdf(doi: str) -> Dict[str, Any]:
+async def find_paper_pdf(doi: str, verbose: bool = False) -> Dict[str, Any]:
     """
     Find the best available legal PDF for a paper by DOI. Checks Unpaywall,
     PubMed Central, preprint servers, and institutional repositories.
@@ -750,10 +825,15 @@ async def find_paper_pdf(doi: str) -> Dict[str, Any]:
     Args:
         doi: DOI string (e.g., "10.1038/s41591-023-02437-x" or
              "DOI:10.1016/j.gie.2023.06.056")
+        verbose: Include all OA locations in response (default: False to save tokens)
     """
     logging.info(f"PDF resolution: {doi}")
     try:
-        return await asyncio.to_thread(unpaywall.get_paper_pdf, doi)
+        result = await asyncio.to_thread(unpaywall.get_paper_pdf, doi)
+        if not verbose and isinstance(result, dict):
+            result.pop("all_locations", None)
+            result.pop("all_locations_count", None)
+        return result
     except Exception as e:
         return {"error": f"PDF resolution failed: {str(e)}"}
 
