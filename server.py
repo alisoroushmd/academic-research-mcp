@@ -39,6 +39,7 @@ import medrxiv_client
 import openalex_client as oalex
 import crossref_client as cr
 import unpaywall_client as unpaywall
+import orchestrator
 import cache
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -105,6 +106,80 @@ def _compact_single(paper: dict, brief: bool) -> dict:
 
 
 mcp = FastMCP("academic-research")
+
+
+
+
+# ============================================================================
+# SMART SEARCH & UNIVERSAL RESOLVER (use these first)
+# ============================================================================
+
+@mcp.tool()
+async def smart_search(
+    query: str,
+    num_results: int = 10,
+    year: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+    include_preprints: bool = True,
+    brief: bool = True,
+) -> Dict[str, Any]:
+    """
+    THE RECOMMENDED SEARCH TOOL. Efficiently searches multiple academic databases
+    with automatic deduplication and early stopping. Use this instead of calling
+    individual search tools — it picks the best sources, avoids redundant queries,
+    and deduplicates results by DOI.
+
+    Search priority: OpenAlex (fast, broad) → Semantic Scholar (AI/ML strength)
+    → arXiv + medRxiv (preprints) → CrossRef (fallback). Stops early when
+    enough unique results are found.
+
+    Args:
+        query: Search query (e.g., "gastric intestinal metaplasia deep learning")
+        num_results: Target number of unique results (default: 10)
+        year: Year filter (e.g., "2020-2025")
+        sources: Override source order (e.g., ["arxiv", "s2"] for CS preprints).
+                 Options: "openalex", "s2", "crossref", "arxiv", "medrxiv"
+        include_preprints: Include arXiv/medRxiv (default: True)
+        brief: Return compact results (default: True)
+    """
+    logging.info(f"Smart search: {query}")
+    try:
+        result = await asyncio.to_thread(
+            orchestrator.smart_search, query, num_results, year, sources, include_preprints
+        )
+        if brief:
+            result["results"] = _compact_list(result.get("results", []), True)
+        return result
+    except Exception as e:
+        return {"error": f"Smart search failed: {str(e)}"}
+
+
+@mcp.tool()
+async def find_paper(identifier: str, brief: bool = False) -> Dict[str, Any]:
+    """
+    Universal paper resolver. Give it ANY identifier and it finds the paper
+    through the cheapest API path. No need to figure out which tool to use.
+
+    Accepts: DOI, PMID, arXiv ID, medRxiv DOI, Semantic Scholar ID,
+    PubMed/arXiv/DOI URLs, or even a title string.
+
+    Examples:
+        "10.1038/s41591-023-02437-x"
+        "PMID:37890456"
+        "2312.00567"
+        "https://arxiv.org/abs/2312.00567"
+        "Real-time semantic segmentation of gastric intestinal metaplasia"
+
+    Args:
+        identifier: Any paper identifier, URL, or title
+        brief: Return compact result (default: False for single lookups)
+    """
+    logging.info(f"Find paper: {identifier}")
+    try:
+        result = await asyncio.to_thread(orchestrator.find_paper, identifier)
+        return _compact_single(result, brief)
+    except Exception as e:
+        return {"error": f"Find paper failed: {str(e)}"}
 
 
 # ============================================================================
