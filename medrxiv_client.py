@@ -11,6 +11,7 @@ and version history.
 
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 import cache
 import http_client
 
@@ -44,7 +45,7 @@ def search_medrxiv(
     base = MEDRXIV_API if server == "medrxiv" else BIORXIV_API
 
     # Search published articles that match the query
-    url = f"{base}/pubs/{server}/{query}/na/json"
+    url = f"{base}/pubs/{quote(server, safe='')}/{quote(query, safe='')}/na/json"
     resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
@@ -102,7 +103,7 @@ def get_medrxiv_preprint(doi: str) -> Dict[str, Any]:
     """
     doi = _clean_doi(doi)
 
-    url = f"{MEDRXIV_API}/details/{doi}/json"
+    url = f"{MEDRXIV_API}/details/{quote(doi, safe='/')}/json"
     resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()
@@ -144,7 +145,7 @@ def get_publication_status(doi: str) -> Dict[str, Any]:
     """
     doi = _clean_doi(doi)
 
-    url = f"{MEDRXIV_API}/publisher/doi/{doi}/json"
+    url = f"{MEDRXIV_API}/publisher/doi/{quote(doi, safe='/')}/json"
     resp = http_client.get(url)
     resp.raise_for_status()
     data = resp.json()

@@ -145,6 +145,13 @@ def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(value, high))
 
 
+def _log_query(query: str, max_len: int = 80) -> str:
+    """Truncate query for safe logging (avoid leaking sensitive search terms)."""
+    if len(query) <= max_len:
+        return query
+    return query[:max_len] + "..."
+
+
 mcp = FastMCP("academic-research")
 
 
@@ -181,7 +188,7 @@ async def smart_search(
         brief: Return compact results (default: True)
     """
     num_results = _clamp(num_results, 1, 100)
-    logger.info(f"Smart search: {query}")
+    logger.info(f"Smart search: {_log_query(query)}")
     try:
         result = await asyncio.to_thread(
             orchestrator.smart_search, query, num_results, year, sources, include_preprints
@@ -213,7 +220,7 @@ async def find_paper(identifier: str, brief: bool = False) -> Dict[str, Any]:
         identifier: Any paper identifier, URL, or title
         brief: Return compact result (default: False for single lookups)
     """
-    logger.info(f"Find paper: {identifier}")
+    logger.info(f"Find paper: {_log_query(identifier)}")
     try:
         result = await asyncio.to_thread(orchestrator.find_paper, identifier)
         return _compact_single(result, brief)
@@ -265,7 +272,7 @@ async def search_papers(
         server: [medRxiv/bioRxiv] Which server to search (default: "medrxiv")
     """
     num_results = _clamp(num_results, 1, 200)
-    logger.info(f"Search papers: query={query}, source={source}")
+    logger.info(f"Search papers: query={_log_query(query)}, source={source}")
 
     try:
         if source == "openalex":
@@ -328,7 +335,7 @@ async def search_authors(
         num_results: Number of results (default: 5, max: 50)
     """
     num_results = _clamp(num_results, 1, 50)
-    logger.info(f"Search authors: query={query}, source={source}")
+    logger.info(f"Search authors: query={_log_query(query)}, source={source}")
 
     try:
         if source == "openalex":
@@ -366,7 +373,7 @@ async def get_author(
                 Auto-detected from identifier format when possible.
     """
     identifier = identifier.strip()
-    logger.info(f"Get author: {identifier}, source={source}")
+    logger.info(f"Get author: {_log_query(identifier)}, source={source}")
 
     if source is None:
         if _ORCID_RE.match(identifier):
@@ -421,7 +428,7 @@ async def get_author_works(
     """
     num_results = _clamp(num_results, 1, 200)
     identifier = identifier.strip()
-    logger.info(f"Get author works: {identifier}, source={source}")
+    logger.info(f"Get author works: {_log_query(identifier)}, source={source}")
 
     if source is None:
         if _ORCID_RE.match(identifier):
@@ -562,6 +569,8 @@ async def batch_get_papers(paper_ids: List[str]) -> List[Optional[Dict[str, Any]
     Args:
         paper_ids: List of paper identifiers (max 500)
     """
+    if len(paper_ids) > 500:
+        return _error_list(f"Too many paper IDs: {len(paper_ids)}. Maximum is 500.")
     logger.info(f"Batch lookup: {len(paper_ids)} papers")
     try:
         return await asyncio.to_thread(s2.batch_get_papers, paper_ids)
@@ -700,8 +709,10 @@ async def batch_check_open_access(dois: List[str]) -> List[Dict[str, Any]]:
     for better performance.
 
     Args:
-        dois: List of DOI strings (recommended max 50 per batch)
+        dois: List of DOI strings (max 50 per batch)
     """
+    if len(dois) > 50:
+        return _error_list(f"Too many DOIs: {len(dois)}. Maximum is 50.")
     logger.info(f"Batch OA check: {len(dois)} DOIs")
     try:
         return await asyncio.to_thread(unpaywall.batch_check_oa, dois)

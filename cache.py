@@ -249,6 +249,11 @@ def cached(category: str = "general", ttl: float = SEARCH_TTL):
             if result is not None:
                 return result
             result = func(*args, **kwargs)
+            # Don't cache error responses
+            if isinstance(result, dict) and "error" in result:
+                return result
+            if isinstance(result, list) and result and isinstance(result[0], dict) and "error" in result[0]:
+                return result
             put(key, result, category=category, ttl=ttl)
             return result
         return wrapper
