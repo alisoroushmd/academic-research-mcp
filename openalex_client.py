@@ -50,7 +50,7 @@ def search_works(
     params = _params_with_email({
         "search": query,
         "per_page": min(num_results, 200),
-        "sort": f"{sort_by}:desc" if sort_by == "relevance_score" else f"{sort_by}:desc",
+        "sort": sort_by if sort_by == "relevance_score" else f"{sort_by}:desc",
     })
 
     filters = []
@@ -243,7 +243,7 @@ def get_author_works(
     params = _params_with_email({
         "filter": f"author.id:{raw_id}",
         "per_page": min(num_results, 200),
-        "sort": f"{sort_by}:desc" if sort_by == "relevance_score" else f"{sort_by}:desc",
+        "sort": sort_by if sort_by == "relevance_score" else f"{sort_by}:desc",
     })
     resp = http_client.get(url, params=params)
     resp.raise_for_status()

@@ -87,25 +87,30 @@ def search_author(author_name: str) -> Dict[str, Any]:
     Returns:
         Dict with name, affiliation, interests, h-index, and publications.
     """
-    search_query = scholarly.search_author(author_name)
-    author = next(search_query)
-    filled = scholarly.fill(author)
-    return {
-        "name": filled.get("name", ""),
-        "affiliation": filled.get("affiliation", ""),
-        "interests": filled.get("interests", []),
-        "citedby": filled.get("citedby", 0),
-        "h_index": filled.get("hindex", 0),
-        "i10_index": filled.get("i10index", 0),
-        "publications": [
-            {
-                "title": pub.get("bib", {}).get("title", ""),
-                "year": pub.get("bib", {}).get("pub_year", ""),
-                "citations": pub.get("num_citations", 0),
-            }
-            for pub in filled.get("publications", [])[:10]
-        ],
-    }
+    try:
+        search_query = scholarly.search_author(author_name)
+        author = next(search_query)
+        filled = scholarly.fill(author)
+        return {
+            "name": filled.get("name", ""),
+            "affiliation": filled.get("affiliation", ""),
+            "interests": filled.get("interests", []),
+            "citedby": filled.get("citedby", 0),
+            "h_index": filled.get("hindex", 0),
+            "i10_index": filled.get("i10index", 0),
+            "publications": [
+                {
+                    "title": pub.get("bib", {}).get("title", ""),
+                    "year": pub.get("bib", {}).get("pub_year", ""),
+                    "citations": pub.get("num_citations", 0),
+                }
+                for pub in filled.get("publications", [])[:10]
+            ],
+        }
+    except StopIteration:
+        return {"error": f"No Google Scholar author found for: {author_name}"}
+    except Exception as e:
+        return {"error": f"Google Scholar author lookup failed: {str(e)}"}
 
 
 def _format_pub(pub) -> Dict[str, Any]:

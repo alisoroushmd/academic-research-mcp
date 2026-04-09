@@ -13,7 +13,6 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
 
 import cache
 import http_client
@@ -121,6 +120,7 @@ def get_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
     return {"error": f"Paper not found: {arxiv_id}"}
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def get_arxiv_by_author(
     author_name: str, num_results: int = 10, category: Optional[str] = None
 ) -> List[Dict[str, Any]]:

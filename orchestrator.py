@@ -13,7 +13,6 @@ import re
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-import http_client
 import cache
 import openalex_client as oalex
 import semantic_scholar_client as s2

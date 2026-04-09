@@ -9,6 +9,7 @@ publication status (whether a preprint has been published in a journal),
 and version history.
 """
 
+import re
 from typing import Any, Dict, List, Optional
 import cache
 import http_client
@@ -251,6 +252,5 @@ def _clean_doi(doi: str) -> str:
     if doi.endswith(".full") or doi.endswith(".full.pdf"):
         doi = doi.split(".full")[0]
     # Remove trailing version like v1, v2
-    import re
     doi = re.sub(r'v\d+$', '', doi)
     return doi

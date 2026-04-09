@@ -10,6 +10,7 @@ Cache is stored at ~/.cache/academic-research-mcp/cache.db by default.
 Set ACADEMIC_CACHE_DIR to override.
 """
 
+import functools
 import hashlib
 import json
 import os
@@ -241,6 +242,7 @@ def cached(category: str = "general", ttl: float = SEARCH_TTL):
             ...
     """
     def decorator(func):
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             key = make_key(func.__name__, *args, **kwargs)
             result = get(key)
@@ -249,7 +251,5 @@ def cached(category: str = "general", ttl: float = SEARCH_TTL):
             result = func(*args, **kwargs)
             put(key, result, category=category, ttl=ttl)
             return result
-        wrapper.__name__ = func.__name__
-        wrapper.__doc__ = func.__doc__
         return wrapper
     return decorator
