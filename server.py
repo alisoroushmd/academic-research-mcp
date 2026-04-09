@@ -14,8 +14,8 @@ plus Unpaywall PDF resolution, local caching, and batch operations:
   8. Unpaywall -- legal open access PDF resolution for any DOI
 
 Features:
-  - Consolidated tool surface (~18 tools instead of 39)
-  - Local SQLite cache to avoid redundant API calls
+  - Consolidated tool surface (~18 tools)
+  - Local SQLite cache with singleton connection and WAL mode
   - S2 batch endpoint for up to 500 papers in one request
   - CrossRef fallback when other APIs are rate-limited
 
@@ -32,8 +32,7 @@ import re
 
 from mcp.server.fastmcp import FastMCP
 
-from google_scholar_web_search import google_scholar_search, advanced_google_scholar_search
-from scholarly import scholarly
+import google_scholar_client as gs
 import orcid_client
 import semantic_scholar_client as s2
 import arxiv_client
@@ -57,12 +56,10 @@ def _compact_paper(paper: Dict[str, Any]) -> Dict[str, Any]:
     Strip a paper result to essential fields for minimal token usage.
     Reduces output by ~60-70% compared to full results.
     """
-    # Truncate abstract to 150 chars
     abstract = paper.get("abstract", "") or ""
     if len(abstract) > 150:
         abstract = abstract[:150].rsplit(" ", 1)[0] + "..."
 
-    # Truncate authors to first 3
     authors = paper.get("authors", [])
     if isinstance(authors, str):
         authors_short = authors[:100] + ("..." if len(authors) > 100 else "")
@@ -74,19 +71,26 @@ def _compact_paper(paper: Dict[str, Any]) -> Dict[str, Any]:
     else:
         authors_short = authors
 
+    # Use explicit None checks to handle 0 correctly
+    cited_by = paper.get("citation_count")
+    if cited_by is None:
+        cited_by = paper.get("cited_by_count")
+    if cited_by is None:
+        cited_by = paper.get("citedby")
+    if cited_by is None:
+        cited_by = 0
+
     compact = {
         "title": paper.get("title", ""),
         "authors": authors_short,
         "year": paper.get("year") or paper.get("publication_year"),
-        "cited_by": paper.get("citation_count") or paper.get("cited_by_count") or paper.get("citedby", 0),
+        "cited_by": cited_by,
         "doi": paper.get("doi", ""),
     }
 
-    # Only include abstract snippet if it exists
     if abstract:
         compact["abstract_snippet"] = abstract
 
-    # Include OA URL if available
     oa_url = paper.get("open_access_url") or paper.get("pdf_url", "")
     if oa_url:
         compact["pdf_url"] = oa_url
@@ -126,7 +130,6 @@ def _error_list(msg: str) -> List[Dict[str, Any]]:
 # VALIDATION HELPERS
 # ============================================================================
 
-_VALID_SOURCES = {"openalex", "s2", "crossref", "arxiv", "medrxiv", "google_scholar", "orcid"}
 _ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 
 
@@ -219,13 +222,13 @@ async def find_paper(identifier: str, brief: bool = False) -> Dict[str, Any]:
 
 
 # ============================================================================
-# UNIFIED SEARCH TOOLS
+# SOURCE-SPECIFIC SEARCH
 # ============================================================================
 
 @mcp.tool()
 async def search_papers(
     query: str,
-    source: Optional[str] = None,
+    source: str = "openalex",
     num_results: int = 10,
     year: Optional[str] = None,
     brief: bool = True,
@@ -240,14 +243,13 @@ async def search_papers(
     server: Literal["medrxiv", "biorxiv"] = "medrxiv",
 ) -> List[Dict[str, Any]]:
     """
-    Search for papers across any academic database. If no source is specified,
-    uses smart_search (recommended). Specify a source when you need
-    source-specific features.
+    Search for papers on a specific academic database. For multi-source search
+    with deduplication, use smart_search instead.
 
     Args:
         query: Search query
-        source: API to search. Options: "openalex", "s2", "crossref", "arxiv",
-                "medrxiv", "google_scholar". Default: None (uses smart_search).
+        source: API to search. Options: "openalex" (default), "s2", "crossref",
+                "arxiv", "medrxiv", "google_scholar".
         num_results: Number of results (default: 10, max: 200)
         year: Year filter (e.g., "2020-2025")
         brief: Return compact results (default: True)
@@ -266,12 +268,6 @@ async def search_papers(
     logger.info(f"Search papers: query={query}, source={source}")
 
     try:
-        if source is None:
-            result = await asyncio.to_thread(
-                orchestrator.smart_search, query, num_results, year
-            )
-            return _compact_list(result.get("results", []), brief)
-
         if source == "openalex":
             results = await asyncio.to_thread(
                 oalex.search_works, query, min(num_results, 200), year,
@@ -299,11 +295,11 @@ async def search_papers(
         elif source == "google_scholar":
             if author or year_range:
                 results = await asyncio.to_thread(
-                    advanced_google_scholar_search, query, author, year_range, num_results
+                    gs.advanced_google_scholar_search, query, author, year_range, num_results
                 )
             else:
                 results = await asyncio.to_thread(
-                    google_scholar_search, query, num_results
+                    gs.google_scholar_search, query, num_results
                 )
         else:
             return _error_list(
@@ -313,13 +309,13 @@ async def search_papers(
 
         return _compact_list(results, brief)
     except Exception as e:
-        return _error_list(f"Search failed ({source or 'smart'}): {str(e)}")
+        return _error_list(f"Search failed ({source}): {str(e)}")
 
 
 @mcp.tool()
 async def search_authors(
     query: str,
-    source: Optional[str] = None,
+    source: str = "openalex",
     num_results: int = 5,
 ) -> List[Dict[str, Any]]:
     """
@@ -328,11 +324,10 @@ async def search_authors(
     Args:
         query: Author name or affiliation (e.g., "Ali Soroush", "Mount Sinai gastroenterology")
         source: API to search. Options: "openalex" (default), "s2", "orcid",
-                "google_scholar". Default: tries OpenAlex first.
+                "google_scholar".
         num_results: Number of results (default: 5, max: 50)
     """
     num_results = _clamp(num_results, 1, 50)
-    source = source or "openalex"
     logger.info(f"Search authors: query={query}, source={source}")
 
     try:
@@ -344,25 +339,8 @@ async def search_authors(
             return await asyncio.to_thread(orcid_client.search_orcid, query, num_results)
         elif source == "google_scholar":
             try:
-                search_query = scholarly.search_author(query)
-                author = await asyncio.to_thread(next, search_query)
-                filled = await asyncio.to_thread(scholarly.fill, author)
-                return [{
-                    "name": filled.get("name", ""),
-                    "affiliation": filled.get("affiliation", ""),
-                    "interests": filled.get("interests", []),
-                    "citedby": filled.get("citedby", 0),
-                    "h_index": filled.get("hindex", 0),
-                    "i10_index": filled.get("i10index", 0),
-                    "publications": [
-                        {
-                            "title": pub.get("bib", {}).get("title", ""),
-                            "year": pub.get("bib", {}).get("pub_year", ""),
-                            "citations": pub.get("num_citations", 0),
-                        }
-                        for pub in filled.get("publications", [])[:10]
-                    ],
-                }]
+                result = await asyncio.to_thread(gs.search_author, query)
+                return [result]
             except StopIteration:
                 return _error_list(f"No Google Scholar author found for: {query}")
         else:
@@ -390,7 +368,6 @@ async def get_author(
     identifier = identifier.strip()
     logger.info(f"Get author: {identifier}, source={source}")
 
-    # Auto-detect source from identifier format
     if source is None:
         if _ORCID_RE.match(identifier):
             source = "orcid"
@@ -446,7 +423,6 @@ async def get_author_works(
     identifier = identifier.strip()
     logger.info(f"Get author works: {identifier}, source={source}")
 
-    # Auto-detect source from identifier format
     if source is None:
         if _ORCID_RE.match(identifier):
             source = "orcid"
@@ -770,4 +746,6 @@ async def cache_clear(category: Optional[str] = None) -> Dict[str, Any]:
 # ============================================================================
 
 if __name__ == "__main__":
+    # Clean up expired cache entries on startup
+    cache.cleanup()
     mcp.run()

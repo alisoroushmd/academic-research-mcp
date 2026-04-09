@@ -76,6 +76,38 @@ def advanced_google_scholar_search(
         return [{"error": f"Google Scholar advanced search failed: {str(e)}"}]
 
 
+def search_author(author_name: str) -> Dict[str, Any]:
+    """
+    Get an author's Google Scholar profile: affiliation, interests, citation count,
+    and top publications.
+
+    Parameters:
+        author_name: Author name (e.g., "Ali Soroush").
+
+    Returns:
+        Dict with name, affiliation, interests, h-index, and publications.
+    """
+    search_query = scholarly.search_author(author_name)
+    author = next(search_query)
+    filled = scholarly.fill(author)
+    return {
+        "name": filled.get("name", ""),
+        "affiliation": filled.get("affiliation", ""),
+        "interests": filled.get("interests", []),
+        "citedby": filled.get("citedby", 0),
+        "h_index": filled.get("hindex", 0),
+        "i10_index": filled.get("i10index", 0),
+        "publications": [
+            {
+                "title": pub.get("bib", {}).get("title", ""),
+                "year": pub.get("bib", {}).get("pub_year", ""),
+                "citations": pub.get("num_citations", 0),
+            }
+            for pub in filled.get("publications", [])[:10]
+        ],
+    }
+
+
 def _format_pub(pub) -> Dict[str, Any]:
     """Format a scholarly publication result into a clean dict."""
     bib = pub.get("bib", {})

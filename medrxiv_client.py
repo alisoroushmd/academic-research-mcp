@@ -10,12 +10,14 @@ and version history.
 """
 
 from typing import Any, Dict, List, Optional
+import cache
 import http_client
 
 MEDRXIV_API = "https://api.medrxiv.org"
 BIORXIV_API = "https://api.biorxiv.org"
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def search_medrxiv(
     query: str,
     num_results: int = 10,
@@ -85,6 +87,7 @@ def search_medrxiv_by_date(
     return results
 
 
+@cache.cached(category="paper", ttl=cache.PAPER_TTL)
 def get_medrxiv_preprint(doi: str) -> Dict[str, Any]:
     """
     Get details for a specific preprint by DOI.

@@ -14,51 +14,67 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
-from typing import Any, Dict, List, Optional
-
-CACHE_DIR = os.environ.get(
-    "ACADEMIC_CACHE_DIR",
-    os.path.expanduser("~/.cache/academic-research-mcp"),
-)
-CACHE_DB = os.path.join(CACHE_DIR, "cache.db")
+from typing import Any, Dict, Optional
 
 # Default TTL: 24 hours for search results, 7 days for paper details
 SEARCH_TTL = 24 * 60 * 60       # 24 hours
 PAPER_TTL = 7 * 24 * 60 * 60    # 7 days
 AUTHOR_TTL = 3 * 24 * 60 * 60   # 3 days
 
+# Singleton connection and lock
+_conn: Optional[sqlite3.Connection] = None
+_lock = threading.Lock()
+
+
+def _get_cache_path() -> str:
+    """Get cache DB path at runtime (not import time)."""
+    cache_dir = os.environ.get(
+        "ACADEMIC_CACHE_DIR",
+        os.path.expanduser("~/.cache/academic-research-mcp"),
+    )
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "cache.db")
+
 
 def _get_db() -> sqlite3.Connection:
-    """Get or create the cache database."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    conn = sqlite3.connect(CACHE_DB, timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS cache (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            category TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            ttl REAL NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_cache_category
-        ON cache(category)
-    """)
-    conn.commit()
-    return conn
+    """Get or create the singleton cache database connection."""
+    global _conn
+    if _conn is not None:
+        return _conn
+
+    with _lock:
+        # Double-check after acquiring lock
+        if _conn is not None:
+            return _conn
+
+        db_path = _get_cache_path()
+        conn = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                category TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                ttl REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cache_category
+            ON cache(category)
+        """)
+        conn.commit()
+        _conn = conn
+
+    return _conn
 
 
 def make_key(prefix: str, *args, **kwargs) -> str:
     """Generate a deterministic cache key from function arguments."""
     raw = json.dumps({"prefix": prefix, "args": args, "kwargs": kwargs}, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
-
-
-# Keep old name as alias for backwards compatibility within the codebase
-_cache_key = make_key
 
 
 def get(key: str) -> Optional[Any]:
@@ -73,19 +89,18 @@ def get(key: str) -> Optional[Any]:
     """
     try:
         conn = _get_db()
-        cursor = conn.execute(
-            "SELECT value, created_at, ttl FROM cache WHERE key = ?",
-            (key,),
-        )
-        row = cursor.fetchone()
-        conn.close()
+        with _lock:
+            cursor = conn.execute(
+                "SELECT value, created_at, ttl FROM cache WHERE key = ?",
+                (key,),
+            )
+            row = cursor.fetchone()
 
         if row is None:
             return None
 
         value, created_at, ttl = row
         if time.time() - created_at > ttl:
-            # Expired — clean up
             _delete(key)
             return None
 
@@ -106,13 +121,13 @@ def put(key: str, value: Any, category: str = "general", ttl: float = SEARCH_TTL
     """
     try:
         conn = _get_db()
-        conn.execute(
-            """INSERT OR REPLACE INTO cache (key, value, category, created_at, ttl)
-               VALUES (?, ?, ?, ?, ?)""",
-            (key, json.dumps(value), category, time.time(), ttl),
-        )
-        conn.commit()
-        conn.close()
+        with _lock:
+            conn.execute(
+                """INSERT OR REPLACE INTO cache (key, value, category, created_at, ttl)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (key, json.dumps(value), category, time.time(), ttl),
+            )
+            conn.commit()
     except Exception:
         pass  # Cache failures should never break the main flow
 
@@ -121,9 +136,9 @@ def _delete(key: str) -> None:
     """Delete a cache entry."""
     try:
         conn = _get_db()
-        conn.execute("DELETE FROM cache WHERE key = ?", (key,))
-        conn.commit()
-        conn.close()
+        with _lock:
+            conn.execute("DELETE FROM cache WHERE key = ?", (key,))
+            conn.commit()
     except Exception:
         pass
 
@@ -141,15 +156,15 @@ def clear(category: Optional[str] = None) -> int:
     """
     try:
         conn = _get_db()
-        if category:
-            cursor = conn.execute(
-                "DELETE FROM cache WHERE category = ?", (category,)
-            )
-        else:
-            cursor = conn.execute("DELETE FROM cache")
-        count = cursor.rowcount
-        conn.commit()
-        conn.close()
+        with _lock:
+            if category:
+                cursor = conn.execute(
+                    "DELETE FROM cache WHERE category = ?", (category,)
+                )
+            else:
+                cursor = conn.execute("DELETE FROM cache")
+            count = cursor.rowcount
+            conn.commit()
         return count
     except Exception:
         return 0
@@ -164,27 +179,22 @@ def stats() -> Dict[str, Any]:
     """
     try:
         conn = _get_db()
+        with _lock:
+            total = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
 
-        # Total count
-        total = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            categories = {}
+            for row in conn.execute(
+                "SELECT category, COUNT(*) FROM cache GROUP BY category"
+            ):
+                categories[row[0]] = row[1]
 
-        # By category
-        categories = {}
-        for row in conn.execute(
-            "SELECT category, COUNT(*) FROM cache GROUP BY category"
-        ):
-            categories[row[0]] = row[1]
+            expired = conn.execute(
+                "SELECT COUNT(*) FROM cache WHERE (? - created_at) > ttl",
+                (time.time(),),
+            ).fetchone()[0]
 
-        # Expired count
-        expired = conn.execute(
-            "SELECT COUNT(*) FROM cache WHERE (? - created_at) > ttl",
-            (time.time(),),
-        ).fetchone()[0]
-
-        conn.close()
-
-        # File size
-        size_bytes = os.path.getsize(CACHE_DB) if os.path.exists(CACHE_DB) else 0
+        db_path = _get_cache_path()
+        size_bytes = os.path.getsize(db_path) if os.path.exists(db_path) else 0
 
         return {
             "total_entries": total,
@@ -192,7 +202,7 @@ def stats() -> Dict[str, Any]:
             "active_entries": total - expired,
             "by_category": categories,
             "cache_size_mb": round(size_bytes / (1024 * 1024), 2),
-            "cache_path": CACHE_DB,
+            "cache_path": db_path,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -207,13 +217,13 @@ def cleanup() -> int:
     """
     try:
         conn = _get_db()
-        cursor = conn.execute(
-            "DELETE FROM cache WHERE (? - created_at) > ttl",
-            (time.time(),),
-        )
-        count = cursor.rowcount
-        conn.commit()
-        conn.close()
+        with _lock:
+            cursor = conn.execute(
+                "DELETE FROM cache WHERE (? - created_at) > ttl",
+                (time.time(),),
+            )
+            count = cursor.rowcount
+            conn.commit()
         return count
     except Exception:
         return 0

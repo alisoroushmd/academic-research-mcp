@@ -120,10 +120,11 @@ When you need to process papers faster than individual APIs allow:
 
 ## Local Cache
 
-The server includes a SQLite cache (WAL mode for concurrent access) at `~/.cache/academic-research-mcp/cache.db` that:
-- Stores paper metadata, search results, and author profiles
+The server includes a SQLite cache (WAL mode, singleton connection, thread-safe) at `~/.cache/academic-research-mcp/cache.db` that:
+- Caches results from all 7 API clients via `@cached` decorator
 - Avoids redundant API calls for frequently accessed papers
-- Default TTL: 24 hours for searches, 7 days for paper details
+- Default TTL: 24 hours for searches, 7 days for paper details, 3 days for authors
+- Expired entries cleaned up automatically on server startup
 - Override location with `ACADEMIC_CACHE_DIR` env var
 
 ## Dependencies

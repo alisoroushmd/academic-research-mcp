@@ -24,6 +24,7 @@ def _params_with_email(params: Dict) -> Dict:
     return params
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def search_works(
     query: str,
     num_results: int = 10,
@@ -80,6 +81,7 @@ def search_works(
     return [_format_work(w) for w in data.get("results", [])]
 
 
+@cache.cached(category="paper", ttl=cache.PAPER_TTL)
 def get_work(work_id: str) -> Dict[str, Any]:
     """
     Get details for a specific work by OpenAlex ID, DOI, PMID, or other identifier.
@@ -123,6 +125,7 @@ def get_work(work_id: str) -> Dict[str, Any]:
     return work
 
 
+@cache.cached(category="author", ttl=cache.AUTHOR_TTL)
 def search_authors(
     query: str,
     num_results: int = 5,

@@ -89,7 +89,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     params = {
         "fields": "title,authors,year,citationCount,abstract,externalIds,venue,"
                   "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
-                  "references,citations,tldr,embedding"
+                  "references,citations,tldr"
     }
     key = cache.make_key("s2_paper", paper_id)
     cached = cache.get(key)

@@ -8,13 +8,14 @@ and education.
 """
 
 from typing import Any, Dict, List, Optional
-import http_client
 import cache
+import http_client
 
 ORCID_API_BASE = "https://pub.orcid.org/v3.0"
 HEADERS = {"Accept": "application/json"}
 
 
+@cache.cached(category="author", ttl=cache.AUTHOR_TTL)
 def search_orcid(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
     """
     Search ORCID for researchers by name, affiliation, or keyword.
@@ -42,6 +43,7 @@ def search_orcid(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
     return results
 
 
+@cache.cached(category="author", ttl=cache.AUTHOR_TTL)
 def get_orcid_profile(orcid_id: str) -> Dict[str, Any]:
     """
     Get a full ORCID profile by ORCID iD.
@@ -81,6 +83,7 @@ def get_orcid_profile(orcid_id: str) -> Dict[str, Any]:
     return profile
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def get_orcid_works(orcid_id: str, max_works: int = 20) -> List[Dict[str, Any]]:
     """
     Get publications from an ORCID profile.

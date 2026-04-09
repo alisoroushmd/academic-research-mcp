@@ -9,11 +9,13 @@ Rate limit: 1 request per 3 seconds (enforced by the client).
 """
 
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+import cache
 import http_client
 
 ARXIV_API_BASE = "http://export.arxiv.org/api/query"
@@ -21,19 +23,22 @@ ATOM_NS = "{http://www.w3.org/2005/Atom}"
 OPENSEARCH_NS = "{http://a9.com/-/spec/opensearch/1.1/}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 
-# Throttle to respect arXiv rate limits
+# Throttle to respect arXiv rate limits (thread-safe)
 _last_request_time = 0
+_throttle_lock = threading.Lock()
 
 
 def _throttle():
     global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < 3.0:
-        time.sleep(3.0 - elapsed)
-    _last_request_time = time.time()
+    with _throttle_lock:
+        now = time.time()
+        elapsed = now - _last_request_time
+        if elapsed < 3.0:
+            time.sleep(3.0 - elapsed)
+        _last_request_time = time.time()
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def search_arxiv(
     query: str,
     num_results: int = 10,
@@ -86,6 +91,7 @@ def search_arxiv(
     return _parse_feed(resp.text)
 
 
+@cache.cached(category="paper", ttl=cache.PAPER_TTL)
 def get_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
     """
     Get details for a specific arXiv paper by ID.
