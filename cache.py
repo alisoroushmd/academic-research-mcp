@@ -32,7 +32,8 @@ AUTHOR_TTL = 3 * 24 * 60 * 60   # 3 days
 def _get_db() -> sqlite3.Connection:
     """Get or create the cache database."""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    conn = sqlite3.connect(CACHE_DB)
+    conn = sqlite3.connect(CACHE_DB, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY,
@@ -50,10 +51,14 @@ def _get_db() -> sqlite3.Connection:
     return conn
 
 
-def _cache_key(prefix: str, *args, **kwargs) -> str:
+def make_key(prefix: str, *args, **kwargs) -> str:
     """Generate a deterministic cache key from function arguments."""
     raw = json.dumps({"prefix": prefix, "args": args, "kwargs": kwargs}, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# Keep old name as alias for backwards compatibility within the codebase
+_cache_key = make_key
 
 
 def get(key: str) -> Optional[Any]:
@@ -227,7 +232,7 @@ def cached(category: str = "general", ttl: float = SEARCH_TTL):
     """
     def decorator(func):
         def wrapper(*args, **kwargs):
-            key = _cache_key(func.__name__, *args, **kwargs)
+            key = make_key(func.__name__, *args, **kwargs)
             result = get(key)
             if result is not None:
                 return result

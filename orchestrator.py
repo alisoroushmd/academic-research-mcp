@@ -21,7 +21,7 @@ import crossref_client as cr
 import arxiv_client
 import medrxiv_client
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def smart_search(
@@ -62,7 +62,7 @@ def smart_search(
           - from_cache: Whether the result came from cache
     """
     # Check cache
-    cache_key = cache._cache_key("smart_search", query, num_results, year, sources, include_preprints)
+    cache_key = cache.make_key("smart_search", query, num_results, year, sources, include_preprints)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         cached_result["from_cache"] = True
@@ -75,7 +75,6 @@ def smart_search(
         sources.append("crossref")
 
     all_papers = []
-    seen_dois = set()
     sources_queried = []
     target = num_results
 
@@ -98,7 +97,7 @@ def smart_search(
                 all_papers.extend(papers)
                 sources_queried.append(source)
         except Exception as e:
-            logging.warning(f"Source {source} failed: {e}")
+            logger.warning(f"Source {source} failed: {e}")
             continue
 
         # After first source, reduce overfetch
@@ -157,7 +156,7 @@ def find_paper(identifier: str) -> Dict[str, Any]:
     identifier = identifier.strip()
 
     # Check cache
-    cache_key = cache._cache_key("find_paper", identifier)
+    cache_key = cache.make_key("find_paper", identifier)
     cached = cache.get(cache_key)
     if cached is not None:
         cached["from_cache"] = True
@@ -233,7 +232,7 @@ def find_paper(identifier: str) -> Dict[str, Any]:
                         pass
 
     except Exception as e:
-        logging.warning(f"find_paper primary lookup failed: {e}")
+        logger.warning(f"find_paper primary lookup failed: {e}")
 
     if not result or (isinstance(result, dict) and "error" in result):
         return {

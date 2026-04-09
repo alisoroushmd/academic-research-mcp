@@ -10,6 +10,7 @@ Rate limit: 100,000 requests/day.
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 import http_client
 
@@ -145,32 +146,38 @@ def get_paper_pdf(doi: str) -> Dict[str, Any]:
 
 def batch_check_oa(dois: List[str]) -> List[Dict[str, Any]]:
     """
-    Check open access status for multiple DOIs.
+    Check open access status for multiple DOIs concurrently.
 
     Parameters:
         dois: List of DOI strings (max 50 recommended per batch).
 
     Returns:
         List of dicts with doi, is_oa, pdf_url, and source for each.
+        Order matches the input list.
     """
-    results = []
-    for doi in dois:
-        doi = _clean_doi(doi)
+    def _check_single(idx_doi):
+        idx, raw_doi = idx_doi
+        doi = _clean_doi(raw_doi)
         if not doi:
-            results.append({"doi": doi, "error": "Invalid DOI"})
-            continue
-
+            return idx, {"doi": raw_doi, "error": "Invalid DOI"}
         try:
             result = get_paper_pdf(doi)
-            results.append({
+            return idx, {
                 "doi": doi,
                 "is_oa": result.get("is_oa", False),
                 "pdf_url": result.get("pdf_url"),
                 "source": result.get("source", "none"),
                 "message": result.get("message", ""),
-            })
+            }
         except Exception as e:
-            results.append({"doi": doi, "error": str(e)})
+            return idx, {"doi": doi, "error": str(e)}
+
+    results = [None] * len(dois)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_check_single, (i, d)): i for i, d in enumerate(dois)}
+        for future in as_completed(futures):
+            idx, result = future.result()
+            results[idx] = result
 
     return results
 
