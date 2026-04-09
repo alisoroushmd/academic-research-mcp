@@ -13,7 +13,6 @@ import re
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-import http_client
 import cache
 import openalex_client as oalex
 import semantic_scholar_client as s2
@@ -21,7 +20,7 @@ import crossref_client as cr
 import arxiv_client
 import medrxiv_client
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def smart_search(
@@ -62,7 +61,7 @@ def smart_search(
           - from_cache: Whether the result came from cache
     """
     # Check cache
-    cache_key = cache._cache_key("smart_search", query, num_results, year, sources, include_preprints)
+    cache_key = cache.make_key("smart_search", query, num_results, year, sources, include_preprints)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         cached_result["from_cache"] = True
@@ -75,7 +74,6 @@ def smart_search(
         sources.append("crossref")
 
     all_papers = []
-    seen_dois = set()
     sources_queried = []
     target = num_results
 
@@ -98,7 +96,7 @@ def smart_search(
                 all_papers.extend(papers)
                 sources_queried.append(source)
         except Exception as e:
-            logging.warning(f"Source {source} failed: {e}")
+            logger.warning(f"Source {source} failed: {e}")
             continue
 
         # After first source, reduce overfetch
@@ -157,7 +155,7 @@ def find_paper(identifier: str) -> Dict[str, Any]:
     identifier = identifier.strip()
 
     # Check cache
-    cache_key = cache._cache_key("find_paper", identifier)
+    cache_key = cache.make_key("find_paper", identifier)
     cached = cache.get(cache_key)
     if cached is not None:
         cached["from_cache"] = True
@@ -205,35 +203,32 @@ def find_paper(identifier: str) -> Dict[str, Any]:
         # Fallback chain if primary didn't work
         if not result or (isinstance(result, dict) and "error" in result):
             if id_type == "doi":
-                # Try CrossRef as DOI fallback
                 try:
                     result = cr.get_work_by_doi(clean_id)
                     source = "crossref"
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"find_paper CrossRef fallback failed for {clean_id}: {e}")
 
             if not result or (isinstance(result, dict) and "error" in result):
                 if id_type in ("doi", "pmid"):
-                    # Try S2 as final fallback
                     prefix = "DOI:" if id_type == "doi" else "PMID:"
                     try:
                         result = s2.get_paper_details(f"{prefix}{clean_id}")
                         source = "s2"
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"find_paper S2 fallback failed for {prefix}{clean_id}: {e}")
 
                 elif id_type == "title":
-                    # Try S2 search as title fallback
                     try:
                         results = s2.search_papers(clean_id, num_results=1)
                         if results:
                             result = results[0]
                             source = "s2"
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"find_paper S2 title fallback failed for '{clean_id}': {e}")
 
     except Exception as e:
-        logging.warning(f"find_paper primary lookup failed: {e}")
+        logger.warning(f"find_paper primary lookup failed: {e}")
 
     if not result or (isinstance(result, dict) and "error" in result):
         return {
@@ -275,29 +270,31 @@ def _query_source(
 def _deduplicate(papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Deduplicate papers by DOI. When duplicates exist, keep the version
-    with the most metadata (highest field count).
+    with the most metadata (highest field count). For papers without DOIs,
+    deduplicate by normalized title prefix.
     """
     seen_dois = {}
     no_doi = []
+    seen_title_prefixes = set()
 
     for paper in papers:
         doi = _extract_doi(paper)
         if doi:
             doi_lower = doi.lower()
             if doi_lower in seen_dois:
-                # Keep the version with more fields
                 existing = seen_dois[doi_lower]
                 if _richness(paper) > _richness(existing):
                     seen_dois[doi_lower] = paper
             else:
                 seen_dois[doi_lower] = paper
         else:
-            # No DOI — deduplicate by title similarity
             title = (paper.get("title", "") or "").lower().strip()
-            if title and not any(
-                _titles_match(title, (p.get("title", "") or "").lower().strip())
-                for p in list(seen_dois.values()) + no_doi
-            ):
+            if not title:
+                continue
+            # Use first 80 chars as a fast dedup key (O(1) lookup)
+            prefix = title[:80]
+            if prefix not in seen_title_prefixes:
+                seen_title_prefixes.add(prefix)
                 no_doi.append(paper)
 
     return list(seen_dois.values()) + no_doi
@@ -327,22 +324,6 @@ def _richness(paper: Dict) -> int:
             else:
                 score += 1
     return score
-
-
-def _titles_match(t1: str, t2: str) -> bool:
-    """Check if two titles are similar enough to be the same paper."""
-    if not t1 or not t2:
-        return False
-    # Exact match
-    if t1 == t2:
-        return True
-    # One contains the other (handles truncation)
-    if len(t1) > 20 and len(t2) > 20:
-        shorter = t1 if len(t1) < len(t2) else t2
-        longer = t2 if len(t1) < len(t2) else t1
-        if shorter in longer:
-            return True
-    return False
 
 
 def _classify_identifier(identifier: str) -> Tuple[str, str]:

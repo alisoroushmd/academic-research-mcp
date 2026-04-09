@@ -10,8 +10,8 @@ No API key required. Set CROSSREF_EMAIL for polite pool access (faster responses
 
 import re
 from typing import Any, Dict, List, Optional
-import http_client
 import cache
+import http_client
 
 CROSSREF_BASE = "https://api.crossref.org"
 
@@ -25,6 +25,7 @@ def _headers() -> Dict[str, str]:
     return h
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def search_works(
     query: str,
     num_results: int = 10,
@@ -84,6 +85,7 @@ def search_works(
     return [_format_work(w) for w in items]
 
 
+@cache.cached(category="paper", ttl=cache.PAPER_TTL)
 def get_work_by_doi(doi: str) -> Dict[str, Any]:
     """
     Get metadata for a specific work by DOI.
@@ -137,30 +139,6 @@ def search_by_author(
 
     items = data.get("message", {}).get("items", [])
     return [_format_work(w) for w in items]
-
-
-def get_citation_count(doi: str) -> Dict[str, Any]:
-    """
-    Get citation count and reference count for a DOI.
-
-    Parameters:
-        doi: DOI string.
-
-    Returns:
-        Dict with citation and reference counts.
-    """
-    doi = doi.replace("https://doi.org/", "").replace("DOI:", "").strip()
-    url = f"{CROSSREF_BASE}/works/{doi}"
-    resp = http_client.get(url, headers=_headers())
-    resp.raise_for_status()
-    data = resp.json().get("message", {})
-
-    return {
-        "doi": doi,
-        "title": data.get("title", [""])[0] if data.get("title") else "",
-        "is_referenced_by_count": data.get("is-referenced-by-count", 0),
-        "references_count": data.get("references-count", 0),
-    }
 
 
 # --- Helper ---

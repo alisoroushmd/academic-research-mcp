@@ -60,7 +60,7 @@ def search_papers(
     if open_access_only:
         params["openAccessPdf"] = ""
 
-    key = cache._cache_key("s2_search", query, num_results, year, fields_of_study, open_access_only)
+    key = cache.make_key("s2_search", query, num_results, year, fields_of_study, open_access_only)
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -89,9 +89,9 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     params = {
         "fields": "title,authors,year,citationCount,abstract,externalIds,venue,"
                   "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
-                  "references,citations,tldr,embedding"
+                  "references,citations,tldr"
     }
-    key = cache._cache_key("s2_paper", paper_id)
+    key = cache.make_key("s2_paper", paper_id)
     cached = cache.get(key)
     if cached is not None:
         return cached

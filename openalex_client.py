@@ -24,6 +24,7 @@ def _params_with_email(params: Dict) -> Dict:
     return params
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def search_works(
     query: str,
     num_results: int = 10,
@@ -49,7 +50,7 @@ def search_works(
     params = _params_with_email({
         "search": query,
         "per_page": min(num_results, 200),
-        "sort": f"{sort_by}:desc" if sort_by == "relevance_score" else f"{sort_by}:desc",
+        "sort": sort_by if sort_by == "relevance_score" else f"{sort_by}:desc",
     })
 
     filters = []
@@ -80,6 +81,7 @@ def search_works(
     return [_format_work(w) for w in data.get("results", [])]
 
 
+@cache.cached(category="paper", ttl=cache.PAPER_TTL)
 def get_work(work_id: str) -> Dict[str, Any]:
     """
     Get details for a specific work by OpenAlex ID, DOI, PMID, or other identifier.
@@ -123,6 +125,7 @@ def get_work(work_id: str) -> Dict[str, Any]:
     return work
 
 
+@cache.cached(category="author", ttl=cache.AUTHOR_TTL)
 def search_authors(
     query: str,
     num_results: int = 5,
@@ -240,7 +243,7 @@ def get_author_works(
     params = _params_with_email({
         "filter": f"author.id:{raw_id}",
         "per_page": min(num_results, 200),
-        "sort": f"{sort_by}:desc" if sort_by == "relevance_score" else f"{sort_by}:desc",
+        "sort": sort_by if sort_by == "relevance_score" else f"{sort_by}:desc",
     })
     resp = http_client.get(url, params=params)
     resp.raise_for_status()

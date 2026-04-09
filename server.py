@@ -4,17 +4,18 @@ Academic Research MCP Server
 A unified MCP server providing access to seven academic research APIs
 plus Unpaywall PDF resolution, local caching, and batch operations:
 
-  1. Google Scholar — keyword search, advanced search, author profiles
-  2. ORCID — researcher profiles, publications, employment, education, funding
-  3. Semantic Scholar — paper search, citation graphs, author metrics, recommendations, batch lookup
-  4. arXiv — CS/ML preprints, search by author/title/category, full metadata
-  5. medRxiv/bioRxiv — health sciences preprints, publication status tracking
-  6. OpenAlex — 250M+ works, highest throughput, no auth needed
-  7. CrossRef — DOI registry fallback, 50 req/sec, comprehensive metadata
-  8. Unpaywall — legal open access PDF resolution for any DOI
+  1. Google Scholar -- keyword search, advanced search, author profiles
+  2. ORCID -- researcher profiles, publications, employment, education, funding
+  3. Semantic Scholar -- paper search, citation graphs, author metrics, recommendations, batch lookup
+  4. arXiv -- CS/ML preprints, search by author/title/category, full metadata
+  5. medRxiv/bioRxiv -- health sciences preprints, publication status tracking
+  6. OpenAlex -- 250M+ works, highest throughput, no auth needed
+  7. CrossRef -- DOI registry fallback, 50 req/sec, comprehensive metadata
+  8. Unpaywall -- legal open access PDF resolution for any DOI
 
 Features:
-  - Local SQLite cache to avoid redundant API calls
+  - Consolidated tool surface (~18 tools)
+  - Local SQLite cache with singleton connection and WAL mode
   - S2 batch endpoint for up to 500 papers in one request
   - CrossRef fallback when other APIs are rate-limited
 
@@ -24,14 +25,14 @@ No API keys required for basic use. Optional env vars:
   - CROSSREF_EMAIL: CrossRef polite pool (50 req/sec)
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 import asyncio
 import logging
+import re
 
 from mcp.server.fastmcp import FastMCP
 
-from google_scholar_web_search import google_scholar_search, advanced_google_scholar_search
-from scholarly import scholarly
+import google_scholar_client as gs
 import orcid_client
 import semantic_scholar_client as s2
 import arxiv_client
@@ -43,6 +44,7 @@ import orchestrator
 import cache
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -54,12 +56,10 @@ def _compact_paper(paper: Dict[str, Any]) -> Dict[str, Any]:
     Strip a paper result to essential fields for minimal token usage.
     Reduces output by ~60-70% compared to full results.
     """
-    # Truncate abstract to 150 chars
     abstract = paper.get("abstract", "") or ""
     if len(abstract) > 150:
         abstract = abstract[:150].rsplit(" ", 1)[0] + "..."
 
-    # Truncate authors to first 3
     authors = paper.get("authors", [])
     if isinstance(authors, str):
         authors_short = authors[:100] + ("..." if len(authors) > 100 else "")
@@ -71,19 +71,26 @@ def _compact_paper(paper: Dict[str, Any]) -> Dict[str, Any]:
     else:
         authors_short = authors
 
+    # Use explicit None checks to handle 0 correctly
+    cited_by = paper.get("citation_count")
+    if cited_by is None:
+        cited_by = paper.get("cited_by_count")
+    if cited_by is None:
+        cited_by = paper.get("citedby")
+    if cited_by is None:
+        cited_by = 0
+
     compact = {
         "title": paper.get("title", ""),
         "authors": authors_short,
         "year": paper.get("year") or paper.get("publication_year"),
-        "cited_by": paper.get("citation_count") or paper.get("cited_by_count") or paper.get("citedby", 0),
+        "cited_by": cited_by,
         "doi": paper.get("doi", ""),
     }
 
-    # Only include abstract snippet if it exists
     if abstract:
         compact["abstract_snippet"] = abstract
 
-    # Include OA URL if available
     oa_url = paper.get("open_access_url") or paper.get("pdf_url", "")
     if oa_url:
         compact["pdf_url"] = oa_url
@@ -105,9 +112,40 @@ def _compact_single(paper: dict, brief: bool) -> dict:
     return _compact_paper(paper)
 
 
+# ============================================================================
+# ERROR HELPERS: Consistent error returns
+# ============================================================================
+
+def _error_dict(msg: str) -> Dict[str, Any]:
+    """Return a standard error dict for single-result tools."""
+    return {"error": msg}
+
+
+def _error_list(msg: str) -> List[Dict[str, Any]]:
+    """Return a standard error list for multi-result tools."""
+    return [{"error": msg}]
+
+
+# ============================================================================
+# VALIDATION HELPERS
+# ============================================================================
+
+_ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+
+
+def _validate_orcid(orcid_id: str) -> Optional[str]:
+    """Validate ORCID format, return error message or None."""
+    if not _ORCID_RE.match(orcid_id.strip()):
+        return f"Invalid ORCID format: '{orcid_id}'. Expected DDDD-DDDD-DDDD-DDDD."
+    return None
+
+
+def _clamp(value: int, low: int, high: int) -> int:
+    """Clamp an integer to [low, high]."""
+    return max(low, min(value, high))
+
+
 mcp = FastMCP("academic-research")
-
-
 
 
 # ============================================================================
@@ -126,23 +164,24 @@ async def smart_search(
     """
     THE RECOMMENDED SEARCH TOOL. Efficiently searches multiple academic databases
     with automatic deduplication and early stopping. Use this instead of calling
-    individual search tools — it picks the best sources, avoids redundant queries,
+    individual search tools -- it picks the best sources, avoids redundant queries,
     and deduplicates results by DOI.
 
-    Search priority: OpenAlex (fast, broad) → Semantic Scholar (AI/ML strength)
-    → arXiv + medRxiv (preprints) → CrossRef (fallback). Stops early when
+    Search priority: OpenAlex (fast, broad) -> Semantic Scholar (AI/ML strength)
+    -> arXiv + medRxiv (preprints) -> CrossRef (fallback). Stops early when
     enough unique results are found.
 
     Args:
         query: Search query (e.g., "gastric intestinal metaplasia deep learning")
-        num_results: Target number of unique results (default: 10)
+        num_results: Target number of unique results (default: 10, max: 100)
         year: Year filter (e.g., "2020-2025")
         sources: Override source order (e.g., ["arxiv", "s2"] for CS preprints).
                  Options: "openalex", "s2", "crossref", "arxiv", "medrxiv"
         include_preprints: Include arXiv/medRxiv (default: True)
         brief: Return compact results (default: True)
     """
-    logging.info(f"Smart search: {query}")
+    num_results = _clamp(num_results, 1, 100)
+    logger.info(f"Smart search: {query}")
     try:
         result = await asyncio.to_thread(
             orchestrator.smart_search, query, num_results, year, sources, include_preprints
@@ -151,7 +190,7 @@ async def smart_search(
             result["results"] = _compact_list(result.get("results", []), True)
         return result
     except Exception as e:
-        return {"error": f"Smart search failed: {str(e)}"}
+        return _error_dict(f"Smart search failed: {str(e)}")
 
 
 @mcp.tool()
@@ -174,320 +213,348 @@ async def find_paper(identifier: str, brief: bool = False) -> Dict[str, Any]:
         identifier: Any paper identifier, URL, or title
         brief: Return compact result (default: False for single lookups)
     """
-    logging.info(f"Find paper: {identifier}")
+    logger.info(f"Find paper: {identifier}")
     try:
         result = await asyncio.to_thread(orchestrator.find_paper, identifier)
         return _compact_single(result, brief)
     except Exception as e:
-        return {"error": f"Find paper failed: {str(e)}"}
+        return _error_dict(f"Find paper failed: {str(e)}")
 
 
 # ============================================================================
-# GOOGLE SCHOLAR TOOLS
+# SOURCE-SPECIFIC SEARCH
 # ============================================================================
 
 @mcp.tool()
-async def google_scholar_search_keywords(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """
-    Search Google Scholar by keywords. Returns titles, authors, abstracts, and URLs.
-
-    Args:
-        query: Search query (e.g., "gastric intestinal metaplasia deep learning")
-        num_results: Number of results to return (default: 5)
-    """
-    logging.info(f"Google Scholar keyword search: {query}")
-    try:
-        return await asyncio.to_thread(google_scholar_search, query, num_results)
-    except Exception as e:
-        return [{"error": f"Google Scholar search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def google_scholar_search_advanced(
+async def search_papers(
     query: str,
+    source: str = "openalex",
+    num_results: int = 10,
+    year: Optional[str] = None,
+    brief: bool = True,
+    # Source-specific options
+    fields_of_study: Optional[List[str]] = None,
+    open_access_only: bool = False,
+    sort_by: Optional[str] = None,
+    category: Optional[str] = None,
+    type_filter: Optional[str] = None,
     author: Optional[str] = None,
     year_range: Optional[tuple] = None,
-    num_results: int = 5,
+    server: Literal["medrxiv", "biorxiv"] = "medrxiv",
 ) -> List[Dict[str, Any]]:
     """
-    Search Google Scholar with advanced filters (author name, year range).
+    Search for papers on a specific academic database. For multi-source search
+    with deduplication, use smart_search instead.
 
     Args:
         query: Search query
-        author: Filter by author name (e.g., "Campanella")
-        year_range: Tuple of (start_year, end_year), e.g., (2020, 2025)
-        num_results: Number of results (default: 5)
+        source: API to search. Options: "openalex" (default), "s2", "crossref",
+                "arxiv", "medrxiv", "google_scholar".
+        num_results: Number of results (default: 10, max: 200)
+        year: Year filter (e.g., "2020-2025")
+        brief: Return compact results (default: True)
+        fields_of_study: [S2 only] Filter by field (e.g., ["Medicine", "Computer Science"])
+        open_access_only: [S2, OpenAlex] Only return open-access papers
+        sort_by: Sort order. OpenAlex: "relevance_score"|"cited_by_count"|"publication_date".
+                 arXiv: "relevance"|"lastUpdatedDate"|"submittedDate".
+                 CrossRef: "relevance"|"published"|"is-referenced-by-count".
+        category: [arXiv] Filter by category (e.g., "cs.CV", "cs.AI")
+        type_filter: [CrossRef] Filter by type (e.g., "journal-article")
+        author: [Google Scholar] Author name filter
+        year_range: [Google Scholar] Tuple of (start_year, end_year)
+        server: [medRxiv/bioRxiv] Which server to search (default: "medrxiv")
     """
-    logging.info(f"Google Scholar advanced search: query={query}, author={author}, years={year_range}")
+    num_results = _clamp(num_results, 1, 200)
+    logger.info(f"Search papers: query={query}, source={source}")
+
     try:
-        return await asyncio.to_thread(
-            advanced_google_scholar_search, query, author, year_range, num_results
-        )
+        if source == "openalex":
+            results = await asyncio.to_thread(
+                oalex.search_works, query, min(num_results, 200), year,
+                open_access_only, sort_by or "relevance_score"
+            )
+        elif source == "s2":
+            results = await asyncio.to_thread(
+                s2.search_papers, query, min(num_results, 100), year,
+                fields_of_study, open_access_only
+            )
+        elif source == "crossref":
+            results = await asyncio.to_thread(
+                cr.search_works, query, min(num_results, 100), year,
+                sort_by or "relevance", type_filter
+            )
+        elif source == "arxiv":
+            results = await asyncio.to_thread(
+                arxiv_client.search_arxiv, query, min(num_results, 100),
+                sort_by or "relevance", category
+            )
+        elif source == "medrxiv":
+            results = await asyncio.to_thread(
+                medrxiv_client.search_medrxiv, query, num_results, server
+            )
+        elif source == "google_scholar":
+            if author or year_range:
+                results = await asyncio.to_thread(
+                    gs.advanced_google_scholar_search, query, author, year_range, num_results
+                )
+            else:
+                results = await asyncio.to_thread(
+                    gs.google_scholar_search, query, num_results
+                )
+        else:
+            return _error_list(
+                f"Unknown source: '{source}'. "
+                f"Options: openalex, s2, crossref, arxiv, medrxiv, google_scholar"
+            )
+
+        return _compact_list(results, brief)
     except Exception as e:
-        return [{"error": f"Google Scholar advanced search failed: {str(e)}"}]
+        return _error_list(f"Search failed ({source}): {str(e)}")
 
 
 @mcp.tool()
-async def google_scholar_author(author_name: str) -> Dict[str, Any]:
+async def search_authors(
+    query: str,
+    source: str = "openalex",
+    num_results: int = 5,
+) -> List[Dict[str, Any]]:
     """
-    Get an author's Google Scholar profile: affiliation, interests, citation count,
-    and top publications.
+    Search for researchers/authors across academic databases.
 
     Args:
-        author_name: Author name (e.g., "Ali Soroush")
+        query: Author name or affiliation (e.g., "Ali Soroush", "Mount Sinai gastroenterology")
+        source: API to search. Options: "openalex" (default), "s2", "orcid",
+                "google_scholar".
+        num_results: Number of results (default: 5, max: 50)
     """
-    logging.info(f"Google Scholar author lookup: {author_name}")
+    num_results = _clamp(num_results, 1, 50)
+    logger.info(f"Search authors: query={query}, source={source}")
+
     try:
-        search_query = scholarly.search_author(author_name)
-        author = await asyncio.to_thread(next, search_query)
-        filled = await asyncio.to_thread(scholarly.fill, author)
-        return {
-            "name": filled.get("name", ""),
-            "affiliation": filled.get("affiliation", ""),
-            "interests": filled.get("interests", []),
-            "citedby": filled.get("citedby", 0),
-            "h_index": filled.get("hindex", 0),
-            "i10_index": filled.get("i10index", 0),
-            "publications": [
-                {
-                    "title": pub.get("bib", {}).get("title", ""),
-                    "year": pub.get("bib", {}).get("pub_year", ""),
-                    "citations": pub.get("num_citations", 0),
-                }
-                for pub in filled.get("publications", [])[:10]
-            ],
-        }
+        if source == "openalex":
+            return await asyncio.to_thread(oalex.search_authors, query, num_results)
+        elif source == "s2":
+            return await asyncio.to_thread(s2.search_authors, query, num_results)
+        elif source == "orcid":
+            return await asyncio.to_thread(orcid_client.search_orcid, query, num_results)
+        elif source == "google_scholar":
+            try:
+                result = await asyncio.to_thread(gs.search_author, query)
+                return [result]
+            except StopIteration:
+                return _error_list(f"No Google Scholar author found for: {query}")
+        else:
+            return _error_list(
+                f"Unknown source: '{source}'. Options: openalex, s2, orcid, google_scholar"
+            )
     except Exception as e:
-        return {"error": f"Google Scholar author lookup failed: {str(e)}"}
+        return _error_list(f"Author search failed ({source}): {str(e)}")
+
+
+@mcp.tool()
+async def get_author(
+    identifier: str,
+    source: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Get a detailed author/researcher profile by ID.
+
+    Args:
+        identifier: Author ID. OpenAlex: "A5023888391" or ORCID. S2: author ID.
+                    ORCID: "0000-0002-1234-5678".
+        source: API to use. Options: "openalex" (default), "s2", "orcid".
+                Auto-detected from identifier format when possible.
+    """
+    identifier = identifier.strip()
+    logger.info(f"Get author: {identifier}, source={source}")
+
+    if source is None:
+        if _ORCID_RE.match(identifier):
+            source = "orcid"
+        elif identifier.startswith("A") and identifier[1:].isdigit():
+            source = "openalex"
+        else:
+            source = "s2"
+
+    try:
+        if source == "openalex":
+            return await asyncio.to_thread(oalex.get_author, identifier)
+        elif source == "s2":
+            return await asyncio.to_thread(s2.get_author_details, identifier)
+        elif source == "orcid":
+            err = _validate_orcid(identifier)
+            if err:
+                return _error_dict(err)
+            return await asyncio.to_thread(orcid_client.get_orcid_profile, identifier)
+        else:
+            return _error_dict(
+                f"Unknown source: '{source}'. Options: openalex, s2, orcid"
+            )
+    except Exception as e:
+        return _error_dict(f"Author lookup failed ({source}): {str(e)}")
+
+
+@mcp.tool()
+async def get_author_works(
+    identifier: str,
+    source: Optional[str] = None,
+    num_results: int = 20,
+    sort_by: Optional[str] = None,
+    query: Optional[str] = None,
+    category: Optional[str] = None,
+    brief: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Get publications by a specific author.
+
+    Args:
+        identifier: Author ID or name depending on source.
+                    OpenAlex: author ID or ORCID. S2: author ID. ORCID: "0000-0002-1234-5678".
+                    CrossRef/arXiv: author name string.
+        source: API to use. Options: "openalex" (default), "s2", "orcid",
+                "crossref", "arxiv". Auto-detected from ID format when possible.
+        num_results: Number of works (default: 20, max: 200)
+        sort_by: [OpenAlex] "publication_date" or "cited_by_count"
+        query: [CrossRef] Additional topic filter
+        category: [arXiv] Category filter (e.g., "cs.CV")
+        brief: Return compact results (default: True)
+    """
+    num_results = _clamp(num_results, 1, 200)
+    identifier = identifier.strip()
+    logger.info(f"Get author works: {identifier}, source={source}")
+
+    if source is None:
+        if _ORCID_RE.match(identifier):
+            source = "orcid"
+        elif identifier.startswith("A") and identifier[1:].isdigit():
+            source = "openalex"
+        elif identifier.isdigit():
+            source = "s2"
+        else:
+            source = "crossref"
+
+    try:
+        if source == "openalex":
+            results = await asyncio.to_thread(
+                oalex.get_author_works, identifier, num_results,
+                sort_by or "publication_date"
+            )
+        elif source == "s2":
+            results = await asyncio.to_thread(
+                s2.get_author_papers, identifier, min(num_results, 100)
+            )
+        elif source == "orcid":
+            err = _validate_orcid(identifier)
+            if err:
+                return _error_list(err)
+            results = await asyncio.to_thread(
+                orcid_client.get_orcid_works, identifier, num_results
+            )
+        elif source == "crossref":
+            results = await asyncio.to_thread(
+                cr.search_by_author, identifier, query, min(num_results, 100)
+            )
+        elif source == "arxiv":
+            results = await asyncio.to_thread(
+                arxiv_client.get_arxiv_by_author, identifier,
+                min(num_results, 100), category
+            )
+        else:
+            return _error_list(
+                f"Unknown source: '{source}'. Options: openalex, s2, orcid, crossref, arxiv"
+            )
+        return _compact_list(results, brief)
+    except Exception as e:
+        return _error_list(f"Author works lookup failed ({source}): {str(e)}")
 
 
 # ============================================================================
-# ORCID TOOLS
+# ORCID-SPECIFIC TOOLS (unique capabilities not covered by unified tools)
 # ============================================================================
 
 @mcp.tool()
-async def orcid_search(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+async def get_author_funding(orcid_id: str) -> List[Dict[str, Any]]:
     """
-    Search ORCID for researchers by name or affiliation.
-
-    Args:
-        query: Search string (e.g., "Ali Soroush", "Mount Sinai gastroenterology")
-        num_results: Max results (default: 5)
-    """
-    logging.info(f"ORCID search: {query}")
-    try:
-        return await asyncio.to_thread(orcid_client.search_orcid, query, num_results)
-    except Exception as e:
-        return [{"error": f"ORCID search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def orcid_profile(orcid_id: str) -> Dict[str, Any]:
-    """
-    Get a full ORCID profile: name, biography, keywords, employment history,
-    education, and external identifiers.
+    Get funding/grants from an ORCID profile: funder, title, dates, grant number.
+    Only available via ORCID.
 
     Args:
         orcid_id: ORCID iD (e.g., "0000-0002-1234-5678")
     """
-    logging.info(f"ORCID profile: {orcid_id}")
-    try:
-        return await asyncio.to_thread(orcid_client.get_orcid_profile, orcid_id)
-    except Exception as e:
-        return {"error": f"ORCID profile lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def orcid_works(orcid_id: str, max_works: int = 20) -> List[Dict[str, Any]]:
-    """
-    Get publications from an ORCID profile with DOIs, PMIDs, and journal info.
-
-    Args:
-        orcid_id: ORCID iD
-        max_works: Maximum publications to return (default: 20)
-    """
-    logging.info(f"ORCID works: {orcid_id}")
-    try:
-        return await asyncio.to_thread(orcid_client.get_orcid_works, orcid_id, max_works)
-    except Exception as e:
-        return [{"error": f"ORCID works lookup failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def orcid_funding(orcid_id: str) -> List[Dict[str, Any]]:
-    """
-    Get funding/grants from an ORCID profile: funder, title, dates, grant number.
-
-    Args:
-        orcid_id: ORCID iD
-    """
-    logging.info(f"ORCID funding: {orcid_id}")
+    err = _validate_orcid(orcid_id)
+    if err:
+        return _error_list(err)
+    logger.info(f"ORCID funding: {orcid_id}")
     try:
         return await asyncio.to_thread(orcid_client.get_orcid_funding, orcid_id)
     except Exception as e:
-        return [{"error": f"ORCID funding lookup failed: {str(e)}"}]
+        return _error_list(f"ORCID funding lookup failed: {str(e)}")
 
 
 # ============================================================================
-# SEMANTIC SCHOLAR TOOLS
+# SEMANTIC SCHOLAR-SPECIFIC TOOLS (unique capabilities)
 # ============================================================================
 
 @mcp.tool()
-async def s2_search_papers(
-    query: str,
-    num_results: int = 10,
-    year: Optional[str] = None,
-    fields_of_study: Optional[List[str]] = None,
-    open_access_only: bool = False,
-    brief: bool = True,
-) -> List[Dict[str, Any]]:
-    """
-    Search Semantic Scholar for papers. Returns titles, authors, citations,
-    abstracts, DOIs, and open access links. Better than Google Scholar for
-    AI/ML and computer science literature.
-
-    Args:
-        query: Search query
-        num_results: Number of results (default: 10, max: 100)
-        year: Year filter (e.g., "2020-2025", "2023-", "-2020")
-        fields_of_study: Filter by field (e.g., ["Medicine", "Computer Science"])
-        open_access_only: Only return open-access papers
-        brief: Return compact results to save tokens (default: True). Set False for full metadata.
-    """
-    logging.info(f"S2 paper search: {query}")
-    try:
-        results = await asyncio.to_thread(
-            s2.search_papers, query, num_results, year, fields_of_study, open_access_only
-        )
-        return _compact_list(results, brief)
-    except Exception as e:
-        return [{"error": f"Semantic Scholar search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def s2_paper_details(paper_id: str, brief: bool = False) -> Dict[str, Any]:
-    """
-    Get full details for a paper: abstract, TLDR, references, citations, and metadata.
-    Accepts Semantic Scholar ID, DOI (prefix with "DOI:"), PMID (prefix with "PMID:"),
-    or ArXiv ID.
-
-    Args:
-        paper_id: Paper identifier (e.g., "DOI:10.1038/s41591-023-02437-x" or "PMID:37890456")
-        brief: Return compact results (default: False for detail lookups)
-    """
-    logging.info(f"S2 paper details: {paper_id}")
-    try:
-        return await asyncio.to_thread(s2.get_paper_details, paper_id)
-    except Exception as e:
-        return {"error": f"Semantic Scholar paper lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def s2_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
+async def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers that cite a given paper (forward citation graph). Useful for finding
-    who built on a specific study.
+    who built on a specific study. Powered by Semantic Scholar.
 
     Args:
-        paper_id: Paper identifier
-        num_results: Number of citing papers (default: 20)
+        paper_id: Paper identifier (S2 ID, "DOI:...", "PMID:...", or arXiv ID)
+        num_results: Number of citing papers (default: 20, max: 100)
     """
-    logging.info(f"S2 citations for: {paper_id}")
+    num_results = _clamp(num_results, 1, 100)
+    logger.info(f"Citations for: {paper_id}")
     try:
         return await asyncio.to_thread(s2.get_paper_citations, paper_id, num_results)
     except Exception as e:
-        return [{"error": f"Semantic Scholar citations lookup failed: {str(e)}"}]
+        return _error_list(f"Citations lookup failed: {str(e)}")
 
 
 @mcp.tool()
-async def s2_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
+async def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers referenced by a given paper (backward citation graph). Useful for
-    tracing the intellectual lineage of a study.
+    tracing the intellectual lineage of a study. Powered by Semantic Scholar.
 
     Args:
-        paper_id: Paper identifier
-        num_results: Number of referenced papers (default: 20)
+        paper_id: Paper identifier (S2 ID, "DOI:...", "PMID:...", or arXiv ID)
+        num_results: Number of referenced papers (default: 20, max: 100)
     """
-    logging.info(f"S2 references for: {paper_id}")
+    num_results = _clamp(num_results, 1, 100)
+    logger.info(f"References for: {paper_id}")
     try:
         return await asyncio.to_thread(s2.get_paper_references, paper_id, num_results)
     except Exception as e:
-        return [{"error": f"Semantic Scholar references lookup failed: {str(e)}"}]
+        return _error_list(f"References lookup failed: {str(e)}")
 
 
 @mcp.tool()
-async def s2_search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """
-    Search for authors on Semantic Scholar. Returns name, affiliations,
-    h-index, citation count, and paper count.
-
-    Args:
-        query: Author name (e.g., "Gabriele Campanella")
-        num_results: Number of results (default: 5)
-    """
-    logging.info(f"S2 author search: {query}")
-    try:
-        return await asyncio.to_thread(s2.search_authors, query, num_results)
-    except Exception as e:
-        return [{"error": f"Semantic Scholar author search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def s2_author_details(author_id: str) -> Dict[str, Any]:
-    """
-    Get detailed Semantic Scholar author profile: h-index, citation count,
-    paper count, affiliations, and homepage.
-
-    Args:
-        author_id: Semantic Scholar author ID
-    """
-    logging.info(f"S2 author details: {author_id}")
-    try:
-        return await asyncio.to_thread(s2.get_author_details, author_id)
-    except Exception as e:
-        return {"error": f"Semantic Scholar author lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def s2_author_papers(author_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
-    """
-    Get papers by a specific Semantic Scholar author.
-
-    Args:
-        author_id: Semantic Scholar author ID
-        num_results: Number of papers (default: 20)
-    """
-    logging.info(f"S2 author papers: {author_id}")
-    try:
-        return await asyncio.to_thread(s2.get_author_papers, author_id, num_results)
-    except Exception as e:
-        return [{"error": f"Semantic Scholar author papers failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def s2_recommend_papers(paper_id: str, num_results: int = 10) -> List[Dict[str, Any]]:
+async def recommend_papers(paper_id: str, num_results: int = 10) -> List[Dict[str, Any]]:
     """
     Get paper recommendations based on a specific paper. Useful for discovering
-    related work you might have missed.
+    related work you might have missed. Powered by Semantic Scholar.
 
     Args:
         paper_id: Paper ID to base recommendations on
-        num_results: Number of recommendations (default: 10)
+        num_results: Number of recommendations (default: 10, max: 100)
     """
-    logging.info(f"S2 recommendations for: {paper_id}")
+    num_results = _clamp(num_results, 1, 100)
+    logger.info(f"Recommendations for: {paper_id}")
     try:
         return await asyncio.to_thread(s2.get_recommended_papers, paper_id, num_results)
     except Exception as e:
-        return [{"error": f"Semantic Scholar recommendations failed: {str(e)}"}]
+        return _error_list(f"Recommendations failed: {str(e)}")
 
 
 @mcp.tool()
-async def s2_batch_papers(paper_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+async def batch_get_papers(paper_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
     """
     Get details for up to 500 papers in a single request. Dramatically faster
     than individual lookups when processing reference lists, citation sets, or
-    systematic review results.
+    systematic review results. Powered by Semantic Scholar.
 
     Accepts any mix of identifiers: S2 IDs, DOIs (prefix "DOI:"),
     PMIDs (prefix "PMID:"), or ArXiv IDs.
@@ -495,121 +562,22 @@ async def s2_batch_papers(paper_ids: List[str]) -> List[Optional[Dict[str, Any]]
     Args:
         paper_ids: List of paper identifiers (max 500)
     """
-    logging.info(f"S2 batch lookup: {len(paper_ids)} papers")
+    logger.info(f"Batch lookup: {len(paper_ids)} papers")
     try:
         return await asyncio.to_thread(s2.batch_get_papers, paper_ids)
     except Exception as e:
-        return [{"error": f"Semantic Scholar batch lookup failed: {str(e)}"}]
+        return _error_list(f"Batch lookup failed: {str(e)}")
 
 
 # ============================================================================
-# ARXIV TOOLS
+# MEDRXIV/BIORXIV-SPECIFIC TOOLS (unique capabilities)
 # ============================================================================
 
 @mcp.tool()
-async def arxiv_search(
-    query: str,
-    num_results: int = 10,
-    sort_by: str = "relevance",
-    category: Optional[str] = None,
-    brief: bool = True,
-) -> List[Dict[str, Any]]:
-    """
-    Search arXiv for papers. Best for CS, ML, and quantitative biology preprints.
-    Supports arXiv query syntax: au: (author), ti: (title), abs: (abstract),
-    cat: (category), and boolean operators AND, OR, ANDNOT.
-
-    Args:
-        query: Search query (e.g., "computational pathology whole slide image",
-               "au:Campanella AND ti:foundation model")
-        num_results: Number of results (default: 10, max: 100)
-        sort_by: "relevance", "lastUpdatedDate", or "submittedDate"
-        category: Filter by arXiv category (e.g., "cs.CV", "cs.AI", "cs.LG",
-                  "eess.IV", "q-bio.QM")
-    """
-    logging.info(f"arXiv search: {query}, category={category}")
-    try:
-        results = await asyncio.to_thread(
-            arxiv_client.search_arxiv, query, num_results, sort_by, category
-        )
-        return _compact_list(results, brief)
-    except Exception as e:
-        return [{"error": f"arXiv search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
-    """
-    Get full details for a specific arXiv paper by ID or URL.
-
-    Args:
-        arxiv_id: arXiv ID (e.g., "2312.00567", "2312.00567v2") or full URL
-                  (e.g., "https://arxiv.org/abs/2312.00567")
-    """
-    logging.info(f"arXiv paper: {arxiv_id}")
-    try:
-        return await asyncio.to_thread(arxiv_client.get_arxiv_paper, arxiv_id)
-    except Exception as e:
-        return {"error": f"arXiv paper lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def arxiv_by_author(
-    author_name: str,
-    num_results: int = 10,
-    category: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Get arXiv papers by a specific author, sorted by submission date.
-
-    Args:
-        author_name: Author name (e.g., "Campanella, Gabriele" or "Campanella")
-        num_results: Number of results (default: 10)
-        category: Optional category filter (e.g., "cs.CV")
-    """
-    logging.info(f"arXiv by author: {author_name}")
-    try:
-        return await asyncio.to_thread(
-            arxiv_client.get_arxiv_by_author, author_name, num_results, category
-        )
-    except Exception as e:
-        return [{"error": f"arXiv author search failed: {str(e)}"}]
-
-
-# ============================================================================
-# MEDRXIV / BIORXIV TOOLS
-# ============================================================================
-
-@mcp.tool()
-async def medrxiv_search(
-    query: str,
-    num_results: int = 10,
-    server: str = "medrxiv",
-    brief: bool = True,
-) -> List[Dict[str, Any]]:
-    """
-    Search medRxiv or bioRxiv for preprints.
-
-    Args:
-        query: Search terms (e.g., "gastric intestinal metaplasia AI")
-        num_results: Max results (default: 10)
-        server: "medrxiv" or "biorxiv"
-    """
-    logging.info(f"{server} search: {query}")
-    try:
-        results = await asyncio.to_thread(
-            medrxiv_client.search_medrxiv, query, num_results, server
-        )
-        return _compact_list(results, brief)
-    except Exception as e:
-        return [{"error": f"{server} search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def medrxiv_by_date(
+async def preprints_by_date(
     start_date: str,
     end_date: str,
-    server: str = "medrxiv",
+    server: Literal["medrxiv", "biorxiv"] = "medrxiv",
     num_results: int = 30,
 ) -> List[Dict[str, Any]]:
     """
@@ -619,52 +587,38 @@ async def medrxiv_by_date(
         start_date: Start date "YYYY-MM-DD"
         end_date: End date "YYYY-MM-DD"
         server: "medrxiv" or "biorxiv"
-        num_results: Max results (default: 30)
+        num_results: Max results (default: 30, max: 200)
     """
-    logging.info(f"{server} by date: {start_date} to {end_date}")
+    num_results = _clamp(num_results, 1, 200)
+    logger.info(f"{server} by date: {start_date} to {end_date}")
     try:
         return await asyncio.to_thread(
             medrxiv_client.search_medrxiv_by_date, start_date, end_date, server, num_results
         )
     except Exception as e:
-        return [{"error": f"{server} date search failed: {str(e)}"}]
+        return _error_list(f"{server} date search failed: {str(e)}")
 
 
 @mcp.tool()
-async def medrxiv_preprint(doi: str) -> Dict[str, Any]:
-    """
-    Get details for a specific preprint by DOI, including version history.
-
-    Args:
-        doi: Preprint DOI (e.g., "10.1101/2024.01.15.24301234") or full URL
-    """
-    logging.info(f"medRxiv/bioRxiv preprint: {doi}")
-    try:
-        return await asyncio.to_thread(medrxiv_client.get_medrxiv_preprint, doi)
-    except Exception as e:
-        return {"error": f"Preprint lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def medrxiv_publication_status(doi: str) -> Dict[str, Any]:
+async def preprint_status(doi: str) -> Dict[str, Any]:
     """
     Check whether a preprint has been published in a peer-reviewed journal.
     Returns the journal DOI, journal name, and publication date if published.
 
     Args:
-        doi: Preprint DOI
+        doi: Preprint DOI (e.g., "10.1101/2024.01.15.24301234")
     """
-    logging.info(f"Publication status check: {doi}")
+    logger.info(f"Publication status check: {doi}")
     try:
         return await asyncio.to_thread(medrxiv_client.get_publication_status, doi)
     except Exception as e:
-        return {"error": f"Publication status check failed: {str(e)}"}
+        return _error_dict(f"Publication status check failed: {str(e)}")
 
 
 @mcp.tool()
-async def medrxiv_recent_by_category(
+async def recent_preprints(
     category: str,
-    server: str = "medrxiv",
+    server: Literal["medrxiv", "biorxiv"] = "medrxiv",
     num_results: int = 20,
 ) -> List[Dict[str, Any]]:
     """
@@ -677,210 +631,35 @@ async def medrxiv_recent_by_category(
                   "radiology and imaging". bioRxiv: "bioinformatics",
                   "cancer biology", "genomics", "systems biology")
         server: "medrxiv" or "biorxiv"
-        num_results: Max results (default: 20)
+        num_results: Max results (default: 20, max: 100)
     """
-    logging.info(f"{server} recent in category: {category}")
+    num_results = _clamp(num_results, 1, 100)
+    logger.info(f"{server} recent in category: {category}")
     try:
         return await asyncio.to_thread(
             medrxiv_client.get_recent_by_category, category, server, num_results
         )
     except Exception as e:
-        return [{"error": f"{server} category search failed: {str(e)}"}]
+        return _error_list(f"{server} category search failed: {str(e)}")
 
 
 # ============================================================================
-# OPENALEX TOOLS
+# OPENALEX-SPECIFIC TOOLS (unique capabilities)
 # ============================================================================
 
 @mcp.tool()
-async def openalex_search(
-    query: str,
-    num_results: int = 10,
-    year: Optional[str] = None,
-    open_access_only: bool = False,
-    sort_by: str = "relevance_score",
-    brief: bool = True,
-) -> List[Dict[str, Any]]:
-    """
-    Search OpenAlex for works. Covers 250M+ works with no rate limit concerns.
-    Best choice for high-volume searches or when other APIs are throttled.
-
-    Args:
-        query: Search query
-        num_results: Number of results (default: 10, max: 200)
-        year: Year filter (e.g., "2023", "2020-2025", ">2022")
-        open_access_only: Only return open-access works
-        sort_by: "relevance_score", "cited_by_count", or "publication_date"
-        brief: Return compact results to save tokens (default: True)
-    """
-    logging.info(f"OpenAlex search: {query}")
-    try:
-        results = await asyncio.to_thread(
-            oalex.search_works, query, num_results, year, open_access_only, sort_by
-        )
-        return _compact_list(results, brief)
-    except Exception as e:
-        return [{"error": f"OpenAlex search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def openalex_work(work_id: str) -> Dict[str, Any]:
-    """
-    Get details for a specific work from OpenAlex. Accepts OpenAlex ID,
-    DOI, or PMID.
-
-    Args:
-        work_id: OpenAlex ID (e.g., "W2741809807"), DOI (e.g., "10.1038/s41591-023-02437-x"),
-                 or PMID (e.g., "pmid:37890456")
-    """
-    logging.info(f"OpenAlex work: {work_id}")
-    try:
-        return await asyncio.to_thread(oalex.get_work, work_id)
-    except Exception as e:
-        return {"error": f"OpenAlex work lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def openalex_search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
-    """
-    Search for authors on OpenAlex. Returns name, affiliations, works count,
-    citation count, and h-index.
-
-    Args:
-        query: Author name
-        num_results: Number of results (default: 5)
-    """
-    logging.info(f"OpenAlex author search: {query}")
-    try:
-        return await asyncio.to_thread(oalex.search_authors, query, num_results)
-    except Exception as e:
-        return [{"error": f"OpenAlex author search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def openalex_author(author_id: str) -> Dict[str, Any]:
-    """
-    Get detailed author profile from OpenAlex: h-index, citation count,
-    research topics, and ORCID.
-
-    Args:
-        author_id: OpenAlex author ID (e.g., "A5023888391") or ORCID
-    """
-    logging.info(f"OpenAlex author: {author_id}")
-    try:
-        return await asyncio.to_thread(oalex.get_author, author_id)
-    except Exception as e:
-        return {"error": f"OpenAlex author lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def openalex_author_works(
-    author_id: str,
-    num_results: int = 20,
-    sort_by: str = "publication_date",
-) -> List[Dict[str, Any]]:
-    """
-    Get works by a specific author from OpenAlex.
-
-    Args:
-        author_id: OpenAlex author ID or ORCID
-        num_results: Number of works (default: 20)
-        sort_by: "publication_date" or "cited_by_count"
-    """
-    logging.info(f"OpenAlex author works: {author_id}")
-    try:
-        return await asyncio.to_thread(oalex.get_author_works, author_id, num_results, sort_by)
-    except Exception as e:
-        return [{"error": f"OpenAlex author works failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def openalex_institution(institution_id: str) -> Dict[str, Any]:
+async def get_institution(institution_id: str) -> Dict[str, Any]:
     """
     Get institution details from OpenAlex: name, country, type, works count.
 
     Args:
         institution_id: OpenAlex institution ID or ROR ID
     """
-    logging.info(f"OpenAlex institution: {institution_id}")
+    logger.info(f"OpenAlex institution: {institution_id}")
     try:
         return await asyncio.to_thread(oalex.get_institution, institution_id)
     except Exception as e:
-        return {"error": f"OpenAlex institution lookup failed: {str(e)}"}
-
-
-# ============================================================================
-# CROSSREF TOOLS (Web Search Fallback)
-# ============================================================================
-
-@mcp.tool()
-async def crossref_search(
-    query: str,
-    num_results: int = 10,
-    year: Optional[str] = None,
-    sort: str = "relevance",
-    type_filter: Optional[str] = None,
-    brief: bool = True,
-) -> List[Dict[str, Any]]:
-    """
-    Search CrossRef for works. CrossRef is the DOI registry covering 150M+ works
-    with very high rate limits (50 req/sec). Use as a fallback when Semantic Scholar
-    or Google Scholar are rate-limited, or when you need fast, high-volume lookups.
-
-    Args:
-        query: Search query
-        num_results: Number of results (default: 10, max: 100)
-        year: Year or range (e.g., "2023", "2020-2025")
-        sort: "relevance", "published", or "is-referenced-by-count"
-        type_filter: Filter by type (e.g., "journal-article", "proceedings-article",
-                     "posted-content" for preprints)
-        brief: Return compact results to save tokens (default: True)
-    """
-    logging.info(f"CrossRef search: {query}")
-    try:
-        results = await asyncio.to_thread(cr.search_works, query, num_results, year, sort, type_filter)
-        return _compact_list(results, brief)
-    except Exception as e:
-        return [{"error": f"CrossRef search failed: {str(e)}"}]
-
-
-@mcp.tool()
-async def crossref_doi(doi: str) -> Dict[str, Any]:
-    """
-    Get metadata for a work by DOI from CrossRef. The authoritative source
-    for DOI metadata.
-
-    Args:
-        doi: DOI string (e.g., "10.1038/s41591-023-02437-x")
-    """
-    logging.info(f"CrossRef DOI lookup: {doi}")
-    try:
-        return await asyncio.to_thread(cr.get_work_by_doi, doi)
-    except Exception as e:
-        return {"error": f"CrossRef DOI lookup failed: {str(e)}"}
-
-
-@mcp.tool()
-async def crossref_by_author(
-    author_name: str,
-    query: Optional[str] = None,
-    num_results: int = 20,
-) -> List[Dict[str, Any]]:
-    """
-    Search CrossRef for works by a specific author, optionally filtered by topic.
-
-    Args:
-        author_name: Author name
-        query: Optional additional search terms
-        num_results: Number of results (default: 20)
-    """
-    logging.info(f"CrossRef author search: {author_name}")
-    try:
-        return await asyncio.to_thread(cr.search_by_author, author_name, query, num_results)
-    except Exception as e:
-        return [{"error": f"CrossRef author search failed: {str(e)}"}]
-
-
+        return _error_dict(f"Institution lookup failed: {str(e)}")
 
 
 # ============================================================================
@@ -902,7 +681,7 @@ async def find_paper_pdf(doi: str, verbose: bool = False) -> Dict[str, Any]:
              "DOI:10.1016/j.gie.2023.06.056")
         verbose: Include all OA locations in response (default: False to save tokens)
     """
-    logging.info(f"PDF resolution: {doi}")
+    logger.info(f"PDF resolution: {doi}")
     try:
         result = await asyncio.to_thread(unpaywall.get_paper_pdf, doi)
         if not verbose and isinstance(result, dict):
@@ -910,23 +689,24 @@ async def find_paper_pdf(doi: str, verbose: bool = False) -> Dict[str, Any]:
             result.pop("all_locations_count", None)
         return result
     except Exception as e:
-        return {"error": f"PDF resolution failed: {str(e)}"}
+        return _error_dict(f"PDF resolution failed: {str(e)}")
 
 
 @mcp.tool()
 async def batch_check_open_access(dois: List[str]) -> List[Dict[str, Any]]:
     """
     Check open access status for multiple papers at once. Returns whether
-    each paper has a free PDF and where to find it.
+    each paper has a free PDF and where to find it. Runs concurrently
+    for better performance.
 
     Args:
         dois: List of DOI strings (recommended max 50 per batch)
     """
-    logging.info(f"Batch OA check: {len(dois)} DOIs")
+    logger.info(f"Batch OA check: {len(dois)} DOIs")
     try:
         return await asyncio.to_thread(unpaywall.batch_check_oa, dois)
     except Exception as e:
-        return [{"error": f"Batch OA check failed: {str(e)}"}]
+        return _error_list(f"Batch OA check failed: {str(e)}")
 
 
 # ============================================================================
@@ -939,11 +719,11 @@ async def cache_stats() -> Dict[str, Any]:
     Get cache statistics: total entries, active vs expired, size on disk,
     and breakdown by category. Useful for monitoring cache health.
     """
-    logging.info("Cache stats requested")
+    logger.info("Cache stats requested")
     try:
         return await asyncio.to_thread(cache.stats)
     except Exception as e:
-        return {"error": f"Cache stats failed: {str(e)}"}
+        return _error_dict(f"Cache stats failed: {str(e)}")
 
 
 @mcp.tool()
@@ -952,18 +732,20 @@ async def cache_clear(category: Optional[str] = None) -> Dict[str, Any]:
     Clear the local cache. Optionally clear only a specific category.
 
     Args:
-        category: Category to clear (e.g., "search", "paper", "author").
-                  If omitted, clears everything.
+        category: Category to clear (e.g., "search", "paper", "author",
+                  "smart_search"). If omitted, clears everything.
     """
-    logging.info(f"Cache clear: category={category}")
+    logger.info(f"Cache clear: category={category}")
     try:
         count = await asyncio.to_thread(cache.clear, category)
         return {"cleared": count, "category": category or "all"}
     except Exception as e:
-        return {"error": f"Cache clear failed: {str(e)}"}
+        return _error_dict(f"Cache clear failed: {str(e)}")
 
 
 # ============================================================================
 
 if __name__ == "__main__":
+    # Clean up expired cache entries on startup
+    cache.cleanup()
     mcp.run()
