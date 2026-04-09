@@ -8,6 +8,7 @@ and education.
 """
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 import cache
 import http_client
 
@@ -55,7 +56,7 @@ def get_orcid_profile(orcid_id: str) -> Dict[str, Any]:
         Dict with name, affiliation, employment history, education, keywords,
         external identifiers, and biography.
     """
-    url = f"{ORCID_API_BASE}/{orcid_id}/person"
+    url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/person"
     resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     person = resp.json()
@@ -95,7 +96,7 @@ def get_orcid_works(orcid_id: str, max_works: int = 20) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with title, journal, year, doi, type, and external_ids.
     """
-    url = f"{ORCID_API_BASE}/{orcid_id}/works"
+    url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/works"
     resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
@@ -153,7 +154,7 @@ def get_orcid_employments(orcid_id: str) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with organization, department, role, start_date, end_date.
     """
-    url = f"{ORCID_API_BASE}/{orcid_id}/employments"
+    url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/employments"
     resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
@@ -187,7 +188,7 @@ def get_orcid_education(orcid_id: str) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with organization, department, role, start_date, end_date.
     """
-    url = f"{ORCID_API_BASE}/{orcid_id}/educations"
+    url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/educations"
     resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
@@ -221,7 +222,7 @@ def get_orcid_funding(orcid_id: str) -> List[Dict[str, Any]]:
     Returns:
         List of dicts with title, funder, type, start_date, end_date, grant_number.
     """
-    url = f"{ORCID_API_BASE}/{orcid_id}/fundings"
+    url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/fundings"
     resp = http_client.get(url, headers=HEADERS)
     resp.raise_for_status()
     data = resp.json()
@@ -258,7 +259,7 @@ def get_orcid_funding(orcid_id: str) -> List[Dict[str, Any]]:
 
 def _get_minimal_profile(orcid_id: str) -> Dict[str, Any]:
     """Fetch just name and current affiliation for search results."""
-    url = f"{ORCID_API_BASE}/{orcid_id}/person"
+    url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/person"
     try:
         resp = http_client.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()

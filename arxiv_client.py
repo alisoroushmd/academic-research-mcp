@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import cache
 import http_client
 
-ARXIV_API_BASE = "http://export.arxiv.org/api/query"
+ARXIV_API_BASE = "https://export.arxiv.org/api/query"
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 OPENSEARCH_NS = "{http://a9.com/-/spec/opensearch/1.1/}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"

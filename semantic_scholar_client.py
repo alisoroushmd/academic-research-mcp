@@ -10,6 +10,7 @@ Set the environment variable S2_API_KEY to use an API key.
 """
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 import http_client
 import cache
 
@@ -85,7 +86,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     Returns:
         Dict with full paper details including abstract, references, citations.
     """
-    url = f"{S2_API_BASE}/paper/{paper_id}"
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}"
     params = {
         "fields": "title,authors,year,citationCount,abstract,externalIds,venue,"
                   "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
@@ -136,7 +137,7 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
     Returns:
         List of citing paper dicts.
     """
-    url = f"{S2_API_BASE}/paper/{paper_id}/citations"
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/citations"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
@@ -162,7 +163,7 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
     Returns:
         List of referenced paper dicts.
     """
-    url = f"{S2_API_BASE}/paper/{paper_id}/references"
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/references"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
@@ -188,7 +189,7 @@ def get_author_details(author_id: str) -> Dict[str, Any]:
         Dict with name, affiliations, h-index, citation count, paper count,
         and top papers.
     """
-    url = f"{S2_API_BASE}/author/{author_id}"
+    url = f"{S2_API_BASE}/author/{quote(author_id, safe='')}"
     params = {
         "fields": "name,affiliations,homepage,paperCount,citationCount,hIndex",
     }
@@ -258,7 +259,7 @@ def get_author_papers(
     Returns:
         List of paper dicts.
     """
-    url = f"{S2_API_BASE}/author/{author_id}/papers"
+    url = f"{S2_API_BASE}/author/{quote(author_id, safe='')}/papers"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,year,citationCount,venue,externalIds,influentialCitationCount",
@@ -281,7 +282,7 @@ def get_recommended_papers(paper_id: str, num_results: int = 10) -> List[Dict[st
     Returns:
         List of recommended paper dicts.
     """
-    url = f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{paper_id}"
+    url = f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{quote(paper_id, safe='')}"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds,abstract",

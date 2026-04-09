@@ -1,5 +1,5 @@
-requests
-mcp
-scholarly
-httpx[socks]
-pip-system-certs
+requests>=2.31,<3
+mcp>=1.0,<2
+scholarly>=1.7,<2
+httpx[socks]>=0.24,<1
+pip-system-certs>=4.0

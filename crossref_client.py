@@ -10,6 +10,7 @@ No API key required. Set CROSSREF_EMAIL for polite pool access (faster responses
 
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 import cache
 import http_client
 
@@ -99,7 +100,7 @@ def get_work_by_doi(doi: str) -> Dict[str, Any]:
     # Clean DOI
     doi = doi.replace("https://doi.org/", "").replace("DOI:", "").strip()
 
-    url = f"{CROSSREF_BASE}/works/{doi}"
+    url = f"{CROSSREF_BASE}/works/{quote(doi, safe='')}"
     resp = http_client.get(url, headers=_headers())
     resp.raise_for_status()
     data = resp.json()

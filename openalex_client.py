@@ -10,6 +10,7 @@ This is the highest-throughput academic API available.
 """
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 import http_client
 import cache
 
@@ -99,7 +100,7 @@ def get_work(work_id: str) -> Dict[str, Any]:
     elif work_id.startswith("DOI:"):
         work_id = f"doi:{work_id[4:]}"
 
-    url = f"{OPENALEX_BASE}/works/{work_id}"
+    url = f"{OPENALEX_BASE}/works/{quote(work_id, safe=':')}"
     params = _params_with_email({})
     resp = http_client.get(url, params=params)
     resp.raise_for_status()
@@ -186,7 +187,7 @@ def get_author(author_id: str) -> Dict[str, Any]:
     if author_id.startswith("0000-"):
         author_id = f"orcid:{author_id}"
 
-    url = f"{OPENALEX_BASE}/authors/{author_id}"
+    url = f"{OPENALEX_BASE}/authors/{quote(author_id, safe=':')}"
     params = _params_with_email({})
     resp = http_client.get(url, params=params)
     resp.raise_for_status()
@@ -262,7 +263,7 @@ def get_institution(institution_id: str) -> Dict[str, Any]:
     Returns:
         Dict with institution details.
     """
-    url = f"{OPENALEX_BASE}/institutions/{institution_id}"
+    url = f"{OPENALEX_BASE}/institutions/{quote(institution_id, safe=':')}"
     params = _params_with_email({})
     resp = http_client.get(url, params=params)
     resp.raise_for_status()
