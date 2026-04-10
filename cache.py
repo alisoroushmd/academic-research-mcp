@@ -14,45 +14,30 @@ import functools
 import hashlib
 import json
 import os
-import sqlite3
-import threading
 import time
 from typing import Any, Dict, Optional
 
+import db as _db
+
+# Re-export the shared lock so any legacy references still work.
+_lock = _db._lock
+
 # Default TTL: 24 hours for search results, 7 days for paper details
-SEARCH_TTL = 24 * 60 * 60       # 24 hours
-PAPER_TTL = 7 * 24 * 60 * 60    # 7 days
-AUTHOR_TTL = 3 * 24 * 60 * 60   # 3 days
+SEARCH_TTL = 24 * 60 * 60  # 24 hours
+PAPER_TTL = 7 * 24 * 60 * 60  # 7 days
+AUTHOR_TTL = 3 * 24 * 60 * 60  # 3 days
 
-# Singleton connection and lock
-_conn: Optional[sqlite3.Connection] = None
-_lock = threading.Lock()
-
-
-def _get_cache_path() -> str:
-    """Get cache DB path at runtime (not import time)."""
-    cache_dir = os.environ.get(
-        "ACADEMIC_CACHE_DIR",
-        os.path.expanduser("~/.cache/academic-research-mcp"),
-    )
-    os.makedirs(cache_dir, exist_ok=True)
-    return os.path.join(cache_dir, "cache.db")
+# Guard so the table DDL only runs once per process.
+_tables_created = False
 
 
-def _get_db() -> sqlite3.Connection:
-    """Get or create the singleton cache database connection."""
-    global _conn
-    if _conn is not None:
-        return _conn
-
+def _ensure_cache_table() -> None:
+    """Create the cache table and index if they don't yet exist."""
+    global _tables_created
+    if _tables_created:
+        return
+    conn = _db.get_db()
     with _lock:
-        # Double-check after acquiring lock
-        if _conn is not None:
-            return _conn
-
-        db_path = _get_cache_path()
-        conn = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cache (
                 key TEXT PRIMARY KEY,
@@ -67,9 +52,7 @@ def _get_db() -> sqlite3.Connection:
             ON cache(category)
         """)
         conn.commit()
-        _conn = conn
-
-    return _conn
+    _tables_created = True
 
 
 def make_key(prefix: str, *args, **kwargs) -> str:
@@ -89,7 +72,8 @@ def get(key: str) -> Optional[Any]:
         Cached value or None if not found/expired.
     """
     try:
-        conn = _get_db()
+        _ensure_cache_table()
+        conn = _db.get_db()
         with _lock:
             cursor = conn.execute(
                 "SELECT value, created_at, ttl FROM cache WHERE key = ?",
@@ -110,7 +94,9 @@ def get(key: str) -> Optional[Any]:
         return None
 
 
-def put(key: str, value: Any, category: str = "general", ttl: float = SEARCH_TTL) -> None:
+def put(
+    key: str, value: Any, category: str = "general", ttl: float = SEARCH_TTL
+) -> None:
     """
     Store a value in cache.
 
@@ -121,7 +107,8 @@ def put(key: str, value: Any, category: str = "general", ttl: float = SEARCH_TTL
         ttl: Time-to-live in seconds.
     """
     try:
-        conn = _get_db()
+        _ensure_cache_table()
+        conn = _db.get_db()
         with _lock:
             conn.execute(
                 """INSERT OR REPLACE INTO cache (key, value, category, created_at, ttl)
@@ -136,7 +123,8 @@ def put(key: str, value: Any, category: str = "general", ttl: float = SEARCH_TTL
 def _delete(key: str) -> None:
     """Delete a cache entry."""
     try:
-        conn = _get_db()
+        _ensure_cache_table()
+        conn = _db.get_db()
         with _lock:
             conn.execute("DELETE FROM cache WHERE key = ?", (key,))
             conn.commit()
@@ -156,7 +144,8 @@ def clear(category: Optional[str] = None) -> int:
         Number of entries cleared.
     """
     try:
-        conn = _get_db()
+        _ensure_cache_table()
+        conn = _db.get_db()
         with _lock:
             if category:
                 cursor = conn.execute(
@@ -179,7 +168,8 @@ def stats() -> Dict[str, Any]:
         Dict with total entries, entries by category, and cache size.
     """
     try:
-        conn = _get_db()
+        _ensure_cache_table()
+        conn = _db.get_db()
         with _lock:
             total = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
 
@@ -194,7 +184,7 @@ def stats() -> Dict[str, Any]:
                 (time.time(),),
             ).fetchone()[0]
 
-        db_path = _get_cache_path()
+        db_path = _db.get_db_path()
         size_bytes = os.path.getsize(db_path) if os.path.exists(db_path) else 0
 
         return {
@@ -217,7 +207,8 @@ def cleanup() -> int:
         Number of entries removed.
     """
     try:
-        conn = _get_db()
+        _ensure_cache_table()
+        conn = _db.get_db()
         with _lock:
             cursor = conn.execute(
                 "DELETE FROM cache WHERE (? - created_at) > ttl",
@@ -232,6 +223,7 @@ def cleanup() -> int:
 
 # --- Decorator for easy caching ---
 
+
 def cached(category: str = "general", ttl: float = SEARCH_TTL):
     """
     Decorator that caches function results.
@@ -241,6 +233,7 @@ def cached(category: str = "general", ttl: float = SEARCH_TTL):
         def search_papers(query, num_results=10):
             ...
     """
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -252,9 +245,16 @@ def cached(category: str = "general", ttl: float = SEARCH_TTL):
             # Don't cache error responses
             if isinstance(result, dict) and "error" in result:
                 return result
-            if isinstance(result, list) and result and isinstance(result[0], dict) and "error" in result[0]:
+            if (
+                isinstance(result, list)
+                and result
+                and isinstance(result[0], dict)
+                and "error" in result[0]
+            ):
                 return result
             put(key, result, category=category, ttl=ttl)
             return result
+
         return wrapper
+
     return decorator

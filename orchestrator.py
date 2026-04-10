@@ -9,16 +9,21 @@ find_paper resolves any identifier (DOI, PMID, title, arXiv ID, URL)
 through the cheapest path without the caller needing to know which tool to use.
 """
 
+import json
 import re
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import cache
+import http_client
 import openalex_client as oalex
 import semantic_scholar_client as s2
 import crossref_client as cr
 import arxiv_client
 import medrxiv_client
+import pubmed_client
+from utils import title_similarity, has_medical_terms, _GENERIC_WORDS, _MEDICAL_TERMS
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +66,19 @@ def smart_search(
           - from_cache: Whether the result came from cache
     """
     # Check cache
-    cache_key = cache.make_key("smart_search", query, num_results, year, sources, include_preprints)
+    cache_key = cache.make_key(
+        "smart_search", query, num_results, year, sources, include_preprints
+    )
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         cached_result["from_cache"] = True
         return cached_result
 
     if sources is None:
-        sources = ["openalex", "s2"]
+        sources = ["openalex"]
+        if _has_medical_terms(query):
+            sources.append("pubmed")
+        sources.append("s2")
         if include_preprints:
             sources.extend(["arxiv", "medrxiv"])
         sources.append("crossref")
@@ -88,7 +98,9 @@ def smart_search(
 
         # How many more do we need?
         remaining = target - unique_count
-        fetch_count = max(remaining + 5, overfetch if not sources_queried else remaining + 3)
+        fetch_count = max(
+            remaining + 5, overfetch if not sources_queried else remaining + 3
+        )
 
         try:
             papers = _query_source(source, query, fetch_count, year)
@@ -194,11 +206,10 @@ def find_paper(identifier: str) -> Dict[str, Any]:
             source = "s2"
 
         elif id_type == "title":
-            # Title search — use OpenAlex, take top result
-            results = oalex.search_works(clean_id, num_results=1)
-            if results:
-                result = results[0]
-                source = "openalex"
+            # Title search — fetch multiple candidates and pick best match.
+            # Natural language title strings (e.g. "Ebigbo real-time Barrett
+            # deep learning") rarely match top-1; we need candidates + scoring.
+            result, source = _resolve_title(clean_id)
 
         # Fallback chain if primary didn't work
         if not result or (isinstance(result, dict) and "error" in result):
@@ -207,7 +218,9 @@ def find_paper(identifier: str) -> Dict[str, Any]:
                     result = cr.get_work_by_doi(clean_id)
                     source = "crossref"
                 except Exception as e:
-                    logger.debug(f"find_paper CrossRef fallback failed for {clean_id}: {e}")
+                    logger.debug(
+                        f"find_paper CrossRef fallback failed for {clean_id}: {e}"
+                    )
 
             if not result or (isinstance(result, dict) and "error" in result):
                 if id_type in ("doi", "pmid"):
@@ -216,25 +229,34 @@ def find_paper(identifier: str) -> Dict[str, Any]:
                         result = s2.get_paper_details(f"{prefix}{clean_id}")
                         source = "s2"
                     except Exception as e:
-                        logger.debug(f"find_paper S2 fallback failed for {prefix}{clean_id}: {e}")
-
-                elif id_type == "title":
-                    try:
-                        results = s2.search_papers(clean_id, num_results=1)
-                        if results:
-                            result = results[0]
-                            source = "s2"
-                    except Exception as e:
-                        logger.debug(f"find_paper S2 title fallback failed for '{clean_id}': {e}")
+                        logger.debug(
+                            f"find_paper S2 fallback failed for {prefix}{clean_id}: {e}"
+                        )
 
     except Exception as e:
         logger.warning(f"find_paper primary lookup failed: {e}")
 
     if not result or (isinstance(result, dict) and "error" in result):
+        # Tailor the error to the identifier type — DOI/PMID failures get a
+        # strong redirect because they almost always indicate a fabricated ID.
+        if id_type in ("doi", "pmid"):
+            return {
+                "error": f"This {id_type.upper()} does not exist: {identifier}",
+                "id_type_detected": id_type,
+                "verified_against": ["openalex", "crossref", "semantic_scholar"],
+                "action_required": (
+                    "STOP. Do NOT guess another identifier. "
+                    "Use smart_search or search_papers with the author name "
+                    "and topic keywords to find the correct paper and its real DOI."
+                ),
+            }
         return {
             "error": f"Could not resolve identifier: {identifier}",
             "id_type_detected": id_type,
-            "suggestion": "Try a different format or use a specific search tool.",
+            "action_required": (
+                "Use smart_search or search_papers with author name + topic "
+                "keywords to find the paper. Do not guess identifiers."
+            ),
         }
 
     if isinstance(result, dict):
@@ -248,6 +270,74 @@ def find_paper(identifier: str) -> Dict[str, Any]:
 
 
 # --- Internal helpers ---
+
+# Keep underscore-prefixed aliases for backward compatibility within this module
+_title_similarity = title_similarity
+_has_medical_terms = has_medical_terms
+
+
+def _resolve_title(title_query: str) -> Tuple[Optional[Dict], Optional[str]]:
+    """
+    Resolve a natural-language title string to a paper by searching multiple
+    sources, collecting all candidates, and picking the best match across
+    all sources using cross-source DOI confirmation.
+    Returns (result, source_name).
+    """
+    all_candidates: List[Tuple[Dict, str]] = []  # (paper, source_name)
+    is_medical = _has_medical_terms(title_query)
+
+    # Collect candidates from multiple sources in parallel-ish fashion
+    for source_name, fetch_fn in [
+        ("openalex", lambda: oalex.search_works(title_query, num_results=5)),
+        (
+            "s2",
+            lambda: s2.search_papers(
+                title_query,
+                num_results=5,
+                fields_of_study=["Medicine"] if is_medical else None,
+            ),
+        ),
+        ("crossref", lambda: cr.search_works(title_query, num_results=5)),
+    ]:
+        try:
+            results = fetch_fn()
+            for r in results:
+                all_candidates.append((r, source_name))
+        except Exception as e:
+            logger.debug(f"Title search via {source_name} failed: {e}")
+
+    if not all_candidates:
+        return None, None
+
+    # Score all candidates
+    scored = []
+    for paper, src in all_candidates:
+        title = paper.get("title", "") or ""
+        base_score = _title_similarity(title_query, title)
+
+        # Cross-source DOI confirmation: papers found by multiple sources
+        # are more likely to be correct
+        doi = _extract_doi(paper)
+        if doi:
+            doi_lower = doi.lower()
+            appearances = sum(
+                1
+                for p, s in all_candidates
+                if s != src and _extract_doi(p).lower() == doi_lower
+            )
+            if appearances > 0:
+                base_score += 0.15 * appearances  # boost for cross-source confirmation
+
+        scored.append((paper, src, base_score))
+
+    scored.sort(key=lambda x: x[2], reverse=True)
+    best_paper, best_source, best_score = scored[0]
+
+    if best_score >= 0.20:
+        return best_paper, best_source
+
+    return None, None
+
 
 def _query_source(
     source: str, query: str, num_results: int, year: Optional[str]
@@ -263,6 +353,9 @@ def _query_source(
         return arxiv_client.search_arxiv(query, num_results=min(num_results, 20))
     elif source == "medrxiv":
         return medrxiv_client.search_medrxiv(query, num_results=min(num_results, 20))
+    elif source == "pubmed":
+        result = pubmed_client.search_pubmed(query, max_results=num_results)
+        return result.get("papers", [])
     else:
         return []
 
@@ -340,17 +433,17 @@ def _classify_identifier(identifier: str) -> Tuple[str, str]:
         return ("doi", doi)
 
     if "arxiv.org/" in text:
-        match = re.search(r'(\d{4}\.\d{4,5}(?:v\d+)?)', text)
+        match = re.search(r"(\d{4}\.\d{4,5}(?:v\d+)?)", text)
         if match:
             return ("arxiv", match.group(1))
 
     if "medrxiv.org/" in text or "biorxiv.org/" in text:
-        match = re.search(r'(10\.1101/[\d.]+)', text)
+        match = re.search(r"(10\.1101/[\d.]+)", text)
         if match:
             return ("medrxiv_doi", match.group(1))
 
     if "pubmed.ncbi.nlm.nih.gov/" in text:
-        match = re.search(r'/(\d+)', text)
+        match = re.search(r"/(\d+)", text)
         if match:
             return ("pmid", match.group(1))
 
@@ -375,16 +468,112 @@ def _classify_identifier(identifier: str) -> Tuple[str, str]:
         return ("doi", text)
 
     # Raw arXiv ID
-    if re.match(r'^\d{4}\.\d{4,5}(v\d+)?$', text):
+    if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", text):
         return ("arxiv", text)
 
     # Raw PMID (all digits, 6-9 chars)
-    if re.match(r'^\d{6,9}$', text):
+    if re.match(r"^\d{6,9}$", text):
         return ("pmid", text)
 
     # S2 paper ID (40-char hex)
-    if re.match(r'^[0-9a-f]{40}$', text):
+    if re.match(r"^[0-9a-f]{40}$", text):
         return ("s2", text)
 
     # Default: treat as title search
     return ("title", text)
+
+
+def harvest_citations(
+    seed_paper_ids: List[str],
+    direction: str = "both",
+) -> Dict[str, Any]:
+    """
+    Harvest citations and/or references from seed papers and deduplicate
+    within the harvested set (synchronous version).
+
+    Does NOT interact with review state — the caller (server.py) handles
+    review logging and paper addition.
+    """
+    if len(seed_paper_ids) > 50:
+        return {"error": "Maximum 50 seed papers per snowball search."}
+
+    all_candidates = []
+    has_api_key = bool(http_client.get_env("S2_API_KEY"))
+    delay = 0.01 if has_api_key else 1.0
+
+    for seed_id in seed_paper_ids:
+        if direction in ("forward", "both"):
+            try:
+                citations = s2.get_paper_citations(seed_id, num_results=100)
+                all_candidates.extend(citations)
+            except Exception as e:
+                logger.warning(f"Snowball citations failed for {seed_id}: {e}")
+
+        if direction in ("backward", "both"):
+            try:
+                references = s2.get_paper_references(seed_id, num_results=100)
+                all_candidates.extend(references)
+            except Exception as e:
+                logger.warning(f"Snowball references failed for {seed_id}: {e}")
+
+        time.sleep(delay)
+
+    total_harvested = len(all_candidates)
+    deduped = _deduplicate(all_candidates)
+    duplicates_within = total_harvested - len(deduped)
+
+    return {
+        "seed_count": len(seed_paper_ids),
+        "candidates": deduped,
+        "total_harvested": total_harvested,
+        "duplicates_within_snowball": duplicates_within,
+    }
+
+
+async def async_harvest_citations(
+    seed_paper_ids: List[str],
+    direction: str = "both",
+) -> Dict[str, Any]:
+    """
+    Async version of harvest_citations — processes seeds in parallel using
+    asyncio.to_thread for each S2 API call. With S2_API_KEY (100 req/sec),
+    50 seeds × 2 directions completes in ~2s instead of ~100s sequential.
+    """
+    import asyncio
+
+    if len(seed_paper_ids) > 50:
+        return {"error": "Maximum 50 seed papers per snowball search."}
+
+    async def _fetch_seed(seed_id: str) -> List[Dict]:
+        papers = []
+        if direction in ("forward", "both"):
+            try:
+                cites = await asyncio.to_thread(s2.get_paper_citations, seed_id, 100)
+                papers.extend(cites)
+            except Exception as e:
+                logger.warning(f"Snowball citations failed for {seed_id}: {e}")
+        if direction in ("backward", "both"):
+            try:
+                refs = await asyncio.to_thread(s2.get_paper_references, seed_id, 100)
+                papers.extend(refs)
+            except Exception as e:
+                logger.warning(f"Snowball references failed for {seed_id}: {e}")
+        return papers
+
+    # Process all seeds concurrently
+    results = await asyncio.gather(*[_fetch_seed(sid) for sid in seed_paper_ids])
+
+    all_candidates = []
+    for papers in results:
+        all_candidates.extend(papers)
+
+    total_harvested = len(all_candidates)
+    deduped = _deduplicate(all_candidates)
+    duplicates_within = total_harvested - len(deduped)
+
+    return {
+        "seed_count": len(seed_paper_ids),
+        "candidates": deduped,
+        "total_harvested": total_harvested,
+        "duplicates_within_snowball": duplicates_within,
+    }

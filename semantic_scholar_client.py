@@ -52,7 +52,7 @@ def search_papers(
         "query": query,
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,abstract,externalIds,venue,"
-                  "openAccessPdf,publicationTypes,journal,influentialCitationCount",
+        "openAccessPdf,publicationTypes,journal,influentialCitationCount",
     }
     if year:
         params["year"] = year
@@ -61,7 +61,9 @@ def search_papers(
     if open_access_only:
         params["openAccessPdf"] = ""
 
-    key = cache.make_key("s2_search", query, num_results, year, fields_of_study, open_access_only)
+    key = cache.make_key(
+        "s2_search", query, num_results, year, fields_of_study, open_access_only
+    )
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -89,8 +91,8 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}"
     params = {
         "fields": "title,authors,year,citationCount,abstract,externalIds,venue,"
-                  "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
-                  "references,citations,tldr"
+        "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
+        "references,citations,tldr"
     }
     key = cache.make_key("s2_paper", paper_id)
     cached = cache.get(key)
@@ -126,6 +128,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     return paper
 
 
+@cache.cached(category="citations", ttl=cache.SEARCH_TTL)
 def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers that cite a given paper.
@@ -146,12 +149,10 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
     resp.raise_for_status()
     data = resp.json()
 
-    return [
-        _format_paper(item.get("citingPaper", {}))
-        for item in data.get("data", [])
-    ]
+    return [_format_paper(item.get("citingPaper", {})) for item in data.get("data", [])]
 
 
+@cache.cached(category="references", ttl=cache.SEARCH_TTL)
 def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers referenced by a given paper.
@@ -172,10 +173,7 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
     resp.raise_for_status()
     data = resp.json()
 
-    return [
-        _format_paper(item.get("citedPaper", {}))
-        for item in data.get("data", [])
-    ]
+    return [_format_paper(item.get("citedPaper", {})) for item in data.get("data", [])]
 
 
 def get_author_details(author_id: str) -> Dict[str, Any]:
@@ -234,21 +232,21 @@ def search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
 
     authors = []
     for item in data.get("data", []):
-        authors.append({
-            "author_id": item.get("authorId", ""),
-            "name": item.get("name", ""),
-            "affiliations": item.get("affiliations", []),
-            "paper_count": item.get("paperCount", 0),
-            "citation_count": item.get("citationCount", 0),
-            "h_index": item.get("hIndex", 0),
-            "s2_url": f"https://www.semanticscholar.org/author/{item.get('authorId', '')}",
-        })
+        authors.append(
+            {
+                "author_id": item.get("authorId", ""),
+                "name": item.get("name", ""),
+                "affiliations": item.get("affiliations", []),
+                "paper_count": item.get("paperCount", 0),
+                "citation_count": item.get("citationCount", 0),
+                "h_index": item.get("hIndex", 0),
+                "s2_url": f"https://www.semanticscholar.org/author/{item.get('authorId', '')}",
+            }
+        )
     return authors
 
 
-def get_author_papers(
-    author_id: str, num_results: int = 20
-) -> List[Dict[str, Any]]:
+def get_author_papers(author_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers by a specific author.
 
@@ -271,7 +269,9 @@ def get_author_papers(
     return [_format_paper(item) for item in data.get("data", [])]
 
 
-def get_recommended_papers(paper_id: str, num_results: int = 10) -> List[Dict[str, Any]]:
+def get_recommended_papers(
+    paper_id: str, num_results: int = 10
+) -> List[Dict[str, Any]]:
     """
     Get paper recommendations based on a single paper.
 
@@ -295,6 +295,7 @@ def get_recommended_papers(paper_id: str, num_results: int = 10) -> List[Dict[st
 
 
 # --- Helper ---
+
 
 def _format_paper(item: Dict) -> Dict[str, Any]:
     """Format a Semantic Scholar paper response into a clean dict."""
@@ -339,15 +340,17 @@ def batch_get_papers(
     """
     url = f"{S2_API_BASE}/paper/batch"
     if fields is None:
-        fields = ("title,authors,year,citationCount,abstract,externalIds,venue,"
-                  "openAccessPdf,publicationTypes,journal,influentialCitationCount")
+        fields = (
+            "title,authors,year,citationCount,abstract,externalIds,venue,"
+            "openAccessPdf,publicationTypes,journal,influentialCitationCount"
+        )
 
     params = {"fields": fields}
 
     # Chunk into batches of 500
     results = []
     for i in range(0, len(paper_ids), 500):
-        chunk = paper_ids[i:i + 500]
+        chunk = paper_ids[i : i + 500]
         resp = http_client.post(
             url,
             headers=_headers(),

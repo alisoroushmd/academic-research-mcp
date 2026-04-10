@@ -48,24 +48,32 @@ def search_works(
         List of work dicts with title, authors, DOI, citations, etc.
     """
     url = f"{OPENALEX_BASE}/works"
-    params = _params_with_email({
-        "search": query,
-        "per_page": min(num_results, 200),
-        "sort": sort_by if sort_by == "relevance_score" else f"{sort_by}:desc",
-    })
+    params = _params_with_email(
+        {
+            "search": query,
+            "per_page": min(num_results, 200),
+            # Relevance is the default sort; omit it. Others need :desc suffix.
+            **({} if sort_by == "relevance_score" else {"sort": f"{sort_by}:desc"}),
+        }
+    )
 
     filters = []
     if year:
-        if "-" in year:
+        if "-" in year and not year.startswith(">") and not year.startswith("<"):
             start, end = year.split("-", 1)
             if start and end:
-                filters.append(f"publication_year:{start}-{end}")
+                # OpenAlex doesn't support publication_year range syntax;
+                # must use from/to_publication_date filters
+                filters.append(f"from_publication_date:{start}-01-01")
+                filters.append(f"to_publication_date:{end}-12-31")
             elif start:
                 filters.append(f"from_publication_date:{start}-01-01")
             elif end:
                 filters.append(f"to_publication_date:{end}-12-31")
         elif year.startswith(">"):
             filters.append(f"from_publication_date:{year[1:]}-01-01")
+        elif year.startswith("<"):
+            filters.append(f"to_publication_date:{year[1:]}-12-31")
         else:
             filters.append(f"publication_year:{year}")
 
@@ -142,34 +150,42 @@ def search_authors(
         List of author dicts with name, affiliations, works count, citation count.
     """
     url = f"{OPENALEX_BASE}/authors"
-    params = _params_with_email({
-        "search": query,
-        "per_page": min(num_results, 200),
-    })
+    params = _params_with_email(
+        {
+            "search": query,
+            "per_page": min(num_results, 200),
+        }
+    )
     resp = http_client.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
 
     authors = []
     for a in data.get("results", []):
-        last_institution = a.get("last_known_institutions", []) or a.get("last_known_institution")
+        last_institution = a.get("last_known_institutions", []) or a.get(
+            "last_known_institution"
+        )
         if isinstance(last_institution, list):
-            affiliations = [inst.get("display_name", "") for inst in last_institution if inst]
+            affiliations = [
+                inst.get("display_name", "") for inst in last_institution if inst
+            ]
         elif isinstance(last_institution, dict) and last_institution:
             affiliations = [last_institution.get("display_name", "")]
         else:
             affiliations = []
 
-        authors.append({
-            "openalex_id": a.get("id", ""),
-            "name": a.get("display_name", ""),
-            "affiliations": affiliations,
-            "works_count": a.get("works_count", 0),
-            "cited_by_count": a.get("cited_by_count", 0),
-            "h_index": a.get("summary_stats", {}).get("h_index", 0),
-            "orcid": (a.get("ids", {}) or {}).get("orcid", ""),
-            "openalex_url": a.get("id", ""),
-        })
+        authors.append(
+            {
+                "openalex_id": a.get("id", ""),
+                "name": a.get("display_name", ""),
+                "affiliations": affiliations,
+                "works_count": a.get("works_count", 0),
+                "cited_by_count": a.get("cited_by_count", 0),
+                "h_index": a.get("summary_stats", {}).get("h_index", 0),
+                "orcid": (a.get("ids", {}) or {}).get("orcid", ""),
+                "openalex_url": a.get("id", ""),
+            }
+        )
     return authors
 
 
@@ -193,9 +209,13 @@ def get_author(author_id: str) -> Dict[str, Any]:
     resp.raise_for_status()
     a = resp.json()
 
-    last_institution = a.get("last_known_institutions", []) or a.get("last_known_institution")
+    last_institution = a.get("last_known_institutions", []) or a.get(
+        "last_known_institution"
+    )
     if isinstance(last_institution, list):
-        affiliations = [inst.get("display_name", "") for inst in last_institution if inst]
+        affiliations = [
+            inst.get("display_name", "") for inst in last_institution if inst
+        ]
     elif isinstance(last_institution, dict) and last_institution:
         affiliations = [last_institution.get("display_name", "")]
     else:
@@ -211,10 +231,7 @@ def get_author(author_id: str) -> Dict[str, Any]:
         "i10_index": a.get("summary_stats", {}).get("i10_index", 0),
         "2yr_mean_citedness": a.get("summary_stats", {}).get("2yr_mean_citedness", 0),
         "orcid": (a.get("ids", {}) or {}).get("orcid", ""),
-        "topics": [
-            t.get("display_name", "")
-            for t in (a.get("topics", []) or [])[:10]
-        ],
+        "topics": [t.get("display_name", "") for t in (a.get("topics", []) or [])[:10]],
         "openalex_url": a.get("id", ""),
     }
 
@@ -241,11 +258,14 @@ def get_author_works(
     raw_id = author_id.split("/")[-1] if "/" in author_id else author_id
 
     url = f"{OPENALEX_BASE}/works"
-    params = _params_with_email({
-        "filter": f"author.id:{raw_id}",
-        "per_page": min(num_results, 200),
-        "sort": sort_by if sort_by == "relevance_score" else f"{sort_by}:desc",
-    })
+    params = _params_with_email(
+        {
+            "filter": f"author.id:{raw_id}",
+            "per_page": min(num_results, 200),
+            # Relevance is the default sort; omit it. Others need :desc suffix.
+            **({} if sort_by == "relevance_score" else {"sort": f"{sort_by}:desc"}),
+        }
+    )
     resp = http_client.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
@@ -283,6 +303,7 @@ def get_institution(institution_id: str) -> Dict[str, Any]:
 
 # --- Helper ---
 
+
 def _format_work(item: Dict) -> Dict[str, Any]:
     """Format an OpenAlex work response into a clean dict."""
     authorships = item.get("authorships", []) or []
@@ -318,12 +339,16 @@ def _format_work(item: Dict) -> Dict[str, Any]:
         "venue": source.get("display_name", ""),
         "cited_by_count": item.get("cited_by_count", 0),
         "doi": (ids.get("doi", "") or "").replace("https://doi.org/", ""),
-        "pmid": (ids.get("pmid", "") or "").replace("https://pubmed.ncbi.nlm.nih.gov/", ""),
+        "pmid": (ids.get("pmid", "") or "").replace(
+            "https://pubmed.ncbi.nlm.nih.gov/", ""
+        ),
         "type": item.get("type", ""),
         "is_open_access": oa.get("is_oa", False),
         "open_access_url": oa.get("oa_url", ""),
         "volume": biblio.get("volume", ""),
         "issue": biblio.get("issue", ""),
-        "pages": f"{biblio.get('first_page', '')}-{biblio.get('last_page', '')}".strip("-"),
+        "pages": f"{biblio.get('first_page', '')}-{biblio.get('last_page', '')}".strip(
+            "-"
+        ),
         "openalex_url": item.get("id", ""),
     }

@@ -1,34 +1,31 @@
 """
-Shared HTTP client with connection pooling, retry logic, and timeouts.
+Shared HTTP clients with connection pooling, retry logic, and timeouts.
 
-All API clients should use get_session() instead of raw requests.get()
-to benefit from:
-  - Connection pooling (reuse TCP connections across requests)
-  - Automatic retry with exponential backoff on 429/5xx
-  - Consistent timeouts
-  - SSL certificate handling
+Provides both sync (requests) and async (httpx) clients. API clients should
+use the async client for true concurrency; the sync client remains available
+for contexts that require blocking calls (e.g., cache decorator internals).
 """
 
 import os
+
+import httpx
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Singleton session
+# --------------------------------------------------------------------------
+# Sync client (requests) — used by cache decorator, scholarly, etc.
+# --------------------------------------------------------------------------
+
 _session = None
 
 DEFAULT_TIMEOUT = 15  # seconds
-BATCH_TIMEOUT = 30    # for batch/bulk endpoints
+BATCH_TIMEOUT = 30  # for batch/bulk endpoints
 
 
 def get_session() -> requests.Session:
     """
     Get or create a shared requests.Session with retry logic and connection pooling.
-
-    Retry strategy:
-      - 3 retries on 429 (rate limited), 500, 502, 503, 504
-      - Exponential backoff: 1s, 2s, 4s
-      - Respects Retry-After header from 429 responses
     """
     global _session
     if _session is None:
@@ -36,7 +33,7 @@ def get_session() -> requests.Session:
 
         retry_strategy = Retry(
             total=3,
-            backoff_factor=1,  # 1s, 2s, 4s
+            backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "POST"],
             respect_retry_after_header=True,
@@ -53,47 +50,102 @@ def get_session() -> requests.Session:
 
 
 def get(url: str, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
-    """
-    Make a GET request with connection pooling and retry logic.
-
-    Parameters:
-        url: Request URL.
-        timeout: Request timeout in seconds.
-        **kwargs: Additional arguments passed to session.get().
-
-    Returns:
-        requests.Response object.
-    """
+    """Make a GET request with connection pooling and retry logic."""
     session = get_session()
     return session.get(url, timeout=timeout, **kwargs)
 
 
 def post(url: str, timeout: int = BATCH_TIMEOUT, **kwargs) -> requests.Response:
-    """
-    Make a POST request with connection pooling and retry logic.
-
-    Parameters:
-        url: Request URL.
-        timeout: Request timeout in seconds.
-        **kwargs: Additional arguments passed to session.post().
-
-    Returns:
-        requests.Response object.
-    """
+    """Make a POST request with connection pooling and retry logic."""
     session = get_session()
     return session.post(url, timeout=timeout, **kwargs)
+
+
+# --------------------------------------------------------------------------
+# Async client (httpx) — preferred for MCP tool handlers
+# --------------------------------------------------------------------------
+
+_async_client = None
+
+# httpx transport with retry-like behavior
+_RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+
+
+def _get_async_transport() -> httpx.AsyncHTTPTransport:
+    return httpx.AsyncHTTPTransport(
+        retries=_MAX_RETRIES,
+        http2=False,
+    )
+
+
+def get_async_client() -> httpx.AsyncClient:
+    """
+    Get or create a shared httpx.AsyncClient with connection pooling.
+
+    httpx's built-in transport retries handle connection-level retries.
+    For HTTP-level retries (429, 5xx), use async_get/async_post which
+    implement retry with backoff.
+    """
+    global _async_client
+    if _async_client is None:
+        _async_client = httpx.AsyncClient(
+            transport=_get_async_transport(),
+            timeout=httpx.Timeout(DEFAULT_TIMEOUT, connect=10.0),
+            follow_redirects=True,
+        )
+    return _async_client
+
+
+async def async_get(
+    url: str, timeout: float = DEFAULT_TIMEOUT, **kwargs
+) -> httpx.Response:
+    """Async GET with retry on 429/5xx and exponential backoff."""
+    import asyncio
+
+    client = get_async_client()
+    for attempt in range(_MAX_RETRIES + 1):
+        resp = await client.get(url, timeout=timeout, **kwargs)
+        if resp.status_code not in _RETRY_STATUS_CODES or attempt == _MAX_RETRIES:
+            return resp
+        # Backoff: 1s, 2s, 4s
+        wait = 2**attempt
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                wait = max(wait, int(retry_after))
+        await asyncio.sleep(wait)
+    return resp
+
+
+async def async_post(
+    url: str, timeout: float = BATCH_TIMEOUT, **kwargs
+) -> httpx.Response:
+    """Async POST with retry on 429/5xx and exponential backoff."""
+    import asyncio
+
+    client = get_async_client()
+    for attempt in range(_MAX_RETRIES + 1):
+        resp = await client.post(url, timeout=timeout, **kwargs)
+        if resp.status_code not in _RETRY_STATUS_CODES or attempt == _MAX_RETRIES:
+            return resp
+        wait = 2**attempt
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                wait = max(wait, int(retry_after))
+        await asyncio.sleep(wait)
+    return resp
+
+
+# --------------------------------------------------------------------------
+# Shared helpers
+# --------------------------------------------------------------------------
 
 
 def get_env(name: str, default: str = "") -> str:
     """
     Get an environment variable at call time (not import time).
     This ensures env vars set by Claude Desktop's config are picked up.
-
-    Parameters:
-        name: Environment variable name.
-        default: Default value if not set.
-
-    Returns:
-        The environment variable value.
     """
     return os.environ.get(name, default)
