@@ -13,11 +13,14 @@ Set ACADEMIC_CACHE_DIR to override.
 import functools
 import hashlib
 import json
+import logging
 import os
 import time
 from typing import Any, Dict, Optional
 
 import db as _db
+
+logger = logging.getLogger(__name__)
 
 # Re-export the shared lock so any legacy references still work.
 _lock = _db._lock
@@ -91,6 +94,7 @@ def get(key: str) -> Optional[Any]:
 
         return json.loads(value)
     except Exception:
+        logger.debug("Cache get failed for key %s", key[:16], exc_info=True)
         return None
 
 
@@ -117,7 +121,7 @@ def put(
             )
             conn.commit()
     except Exception:
-        pass  # Cache failures should never break the main flow
+        logger.debug("Cache put failed for key %s", key[:16], exc_info=True)
 
 
 def _delete(key: str) -> None:
@@ -129,7 +133,7 @@ def _delete(key: str) -> None:
             conn.execute("DELETE FROM cache WHERE key = ?", (key,))
             conn.commit()
     except Exception:
-        pass
+        logger.debug("Cache delete failed for key %s", key[:16], exc_info=True)
 
 
 def clear(category: Optional[str] = None) -> int:
@@ -157,6 +161,7 @@ def clear(category: Optional[str] = None) -> int:
             conn.commit()
         return count
     except Exception:
+        logger.debug("Cache clear failed", exc_info=True)
         return 0
 
 
@@ -218,6 +223,7 @@ def cleanup() -> int:
             conn.commit()
         return count
     except Exception:
+        logger.debug("Cache cleanup failed", exc_info=True)
         return 0
 
 

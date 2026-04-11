@@ -49,14 +49,24 @@ def get_session() -> requests.Session:
     return _session
 
 
+def _require_https(url: str) -> None:
+    """Reject plain HTTP URLs to prevent accidental credential leakage."""
+    if url.startswith("http://"):
+        raise ValueError(
+            f"HTTP (non-TLS) requests are blocked for security. Use HTTPS: {url}"
+        )
+
+
 def get(url: str, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
     """Make a GET request with connection pooling and retry logic."""
+    _require_https(url)
     session = get_session()
     return session.get(url, timeout=timeout, **kwargs)
 
 
 def post(url: str, timeout: int = BATCH_TIMEOUT, **kwargs) -> requests.Response:
     """Make a POST request with connection pooling and retry logic."""
+    _require_https(url)
     session = get_session()
     return session.post(url, timeout=timeout, **kwargs)
 
@@ -103,6 +113,7 @@ async def async_get(
     """Async GET with retry on 429/5xx and exponential backoff."""
     import asyncio
 
+    _require_https(url)
     client = get_async_client()
     for attempt in range(_MAX_RETRIES + 1):
         resp = await client.get(url, timeout=timeout, **kwargs)
@@ -124,6 +135,7 @@ async def async_post(
     """Async POST with retry on 429/5xx and exponential backoff."""
     import asyncio
 
+    _require_https(url)
     client = get_async_client()
     for attempt in range(_MAX_RETRIES + 1):
         resp = await client.post(url, timeout=timeout, **kwargs)

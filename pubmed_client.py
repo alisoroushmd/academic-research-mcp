@@ -9,8 +9,9 @@ Rate limits: 3 requests/sec without API key, 10/sec with NCBI_API_KEY.
 
 import logging
 import time
-import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
+
+import defusedxml.ElementTree as ET
 
 import http_client
 import cache

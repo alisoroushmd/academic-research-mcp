@@ -55,6 +55,7 @@ from formatters import (
     validate_orcid as _validate_orcid,
     clamp as _clamp,
     log_query as _log_query,
+    sanitize_query as _sanitize_query,
     _ORCID_RE,
 )
 
@@ -106,6 +107,7 @@ async def smart_search(
         include_preprints: Include arXiv/medRxiv (default: True)
         brief: Return compact results (default: True)
     """
+    query = _sanitize_query(query)
     num_results = _clamp(num_results, 1, 100)
     logger.info(f"Smart search: {_log_query(query)}")
     try:
@@ -229,6 +231,7 @@ async def search_papers(
         year_range: [Google Scholar] Tuple of (start_year, end_year)
         server: [medRxiv/bioRxiv] Which server to search (default: "medrxiv")
     """
+    query = _sanitize_query(query)
     max_for_source = 10000 if source == "pubmed" else 200
     num_results = _clamp(num_results, 1, max_for_source)
     logger.info(f"Search papers: query={_log_query(query)}, source={source}")
