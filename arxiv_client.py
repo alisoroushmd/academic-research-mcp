@@ -11,8 +11,9 @@ Rate limit: 1 request per 3 seconds (enforced by the client).
 import re
 import threading
 import time
-import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
+
+import defusedxml.ElementTree as ET
 
 import cache
 import http_client

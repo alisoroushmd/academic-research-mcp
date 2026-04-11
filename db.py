@@ -30,7 +30,7 @@ def get_db_path() -> str:
         "ACADEMIC_CACHE_DIR",
         os.path.expanduser("~/.cache/academic-research-mcp"),
     )
-    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
     return os.path.join(cache_dir, "cache.db")
 
 

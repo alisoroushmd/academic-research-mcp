@@ -138,11 +138,10 @@ def delete_review(review_id: str) -> Dict[str, Any]:
         row = conn.execute(
             "SELECT id, name FROM reviews WHERE id = ?", (review_id,)
         ).fetchone()
-    if row is None:
-        return {"error": f"Review not found: {review_id}"}
+        if row is None:
+            return {"error": f"Review not found: {review_id}"}
 
-    name = row[1]
-    with _lock:
+        name = row[1]
         conn.execute("DELETE FROM review_papers WHERE review_id = ?", (review_id,))
         conn.execute("DELETE FROM review_searches WHERE review_id = ?", (review_id,))
         conn.execute("DELETE FROM reviews WHERE id = ?", (review_id,))
@@ -166,10 +165,9 @@ def get_review(review_id: str) -> Dict[str, Any]:
             "SELECT id, name, query_description, status, created_at, updated_at FROM reviews WHERE id = ?",
             (review_id,),
         ).fetchone()
-    if row is None:
-        return {"error": f"Review not found: {review_id}"}
+        if row is None:
+            return {"error": f"Review not found: {review_id}"}
 
-    with _lock:
         status_rows = conn.execute(
             "SELECT status, COUNT(*) FROM review_papers WHERE review_id = ? GROUP BY status",
             (review_id,),
@@ -221,18 +219,18 @@ def add_papers(
     conn = _db.get_db()
     now = time.time()
 
-    for paper in papers:
-        if is_duplicate(review_id, paper):
-            continue
-        paper_id = str(uuid.uuid4())
-        doi = _extract_doi(paper)
-        pmid = paper.get("pmid") or ""
-        title = paper.get("title", "") or ""
-        authors = json.dumps(paper.get("authors", []))
-        year = paper.get("year")
-        metadata = json.dumps(paper)
+    with _lock:
+        for paper in papers:
+            if _is_duplicate(conn, review_id, paper):
+                continue
+            paper_id = str(uuid.uuid4())
+            doi = _extract_doi(paper)
+            pmid = paper.get("pmid") or ""
+            title = paper.get("title", "") or ""
+            authors = json.dumps(paper.get("authors", []))
+            year = paper.get("year")
+            metadata = json.dumps(paper)
 
-        with _lock:
             conn.execute(
                 """INSERT INTO review_papers
                    (id, review_id, doi, pmid, title, authors, year, source, search_id, added_at, status, metadata)
@@ -251,25 +249,22 @@ def add_papers(
                     metadata,
                 ),
             )
-        new_count += 1
+            new_count += 1
 
-    with _lock:
         conn.commit()
         conn.execute("UPDATE reviews SET updated_at = ? WHERE id = ?", (now, review_id))
         conn.commit()
     return new_count
 
 
-def is_duplicate(review_id: str, paper: Dict[str, Any]) -> bool:
-    conn = _db.get_db()
-
+def _is_duplicate(conn, review_id: str, paper: Dict[str, Any]) -> bool:
+    """Check for duplicate paper. Caller must hold _lock."""
     doi = _extract_doi(paper)
     if doi:
-        with _lock:
-            row = conn.execute(
-                "SELECT 1 FROM review_papers WHERE review_id = ? AND LOWER(doi) = ?",
-                (review_id, doi.lower()),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT 1 FROM review_papers WHERE review_id = ? AND LOWER(doi) = ?",
+            (review_id, doi.lower()),
+        ).fetchone()
         if row:
             return True
         # DOI uniquely identifies a paper. If DOI didn't match, the paper is
@@ -278,11 +273,10 @@ def is_duplicate(review_id: str, paper: Dict[str, Any]) -> bool:
 
     pmid = paper.get("pmid") or ""
     if pmid:
-        with _lock:
-            row = conn.execute(
-                "SELECT 1 FROM review_papers WHERE review_id = ? AND pmid = ?",
-                (review_id, pmid),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT 1 FROM review_papers WHERE review_id = ? AND pmid = ?",
+            (review_id, pmid),
+        ).fetchone()
         if row:
             return True
         # PMID also uniquely identifies — skip title scan.
@@ -291,17 +285,23 @@ def is_duplicate(review_id: str, paper: Dict[str, Any]) -> bool:
     # No DOI or PMID: fall back to fuzzy title matching
     title = paper.get("title", "") or ""
     if title:
-        with _lock:
-            existing_titles = conn.execute(
-                "SELECT title FROM review_papers WHERE review_id = ?",
-                (review_id,),
-            ).fetchall()
+        existing_titles = conn.execute(
+            "SELECT title FROM review_papers WHERE review_id = ?",
+            (review_id,),
+        ).fetchall()
 
         for (existing_title,) in existing_titles:
             if title_similarity(title, existing_title) >= 0.85:
                 return True
 
     return False
+
+
+def is_duplicate(review_id: str, paper: Dict[str, Any]) -> bool:
+    """Public API: check for duplicate paper (acquires lock)."""
+    conn = _db.get_db()
+    with _lock:
+        return _is_duplicate(conn, review_id, paper)
 
 
 def log_search(
@@ -409,10 +409,9 @@ def set_active_review(review_id: Optional[str]) -> Dict[str, Any]:
         row = conn.execute(
             "SELECT id FROM reviews WHERE id = ?", (review_id,)
         ).fetchone()
-    if row is None:
-        return {"error": f"Review not found: {review_id}"}
+        if row is None:
+            return {"error": f"Review not found: {review_id}"}
 
-    with _lock:
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_review_id', ?)",
             (review_id,),

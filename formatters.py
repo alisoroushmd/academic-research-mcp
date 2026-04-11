@@ -112,6 +112,16 @@ def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(value, high))
 
 
+MAX_QUERY_LENGTH = 2000
+
+
+def sanitize_query(query: str) -> str:
+    """Truncate oversized queries to prevent abuse and resource waste."""
+    if len(query) > MAX_QUERY_LENGTH:
+        return query[:MAX_QUERY_LENGTH]
+    return query
+
+
 def log_query(query: str, max_len: int = 80) -> str:
     """Truncate query for safe logging (avoid leaking sensitive search terms)."""
     if len(query) <= max_len:
