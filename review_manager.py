@@ -343,8 +343,8 @@ def update_paper_status(review_id: str, paper_ids: List[str], status: str) -> in
     conn = _db.get_db()
     placeholders = ",".join("?" * len(paper_ids))
     with _lock:
-        cursor = conn.execute(  # nosec B608 -- placeholders is "?,?,?" built from len(paper_ids), no user input in SQL string
-            f"UPDATE review_papers SET status = ? WHERE review_id = ? AND id IN ({placeholders})",
+        cursor = conn.execute(
+            f"UPDATE review_papers SET status = ? WHERE review_id = ? AND id IN ({placeholders})",  # nosec B608 -- placeholders is "?,?,?" built from len(paper_ids), no user input in SQL string
             [status, review_id] + paper_ids,
         )
         conn.commit()
