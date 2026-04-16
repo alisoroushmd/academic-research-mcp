@@ -1,10 +1,40 @@
 import SwiftUI
 
-/// App settings — API source info and about section.
+/// App settings — API key configuration, source info, and about section.
 struct SettingsView: View {
+    @AppStorage("anthropic_api_key") private var apiKey = ""
+    @State private var showingKey = false
+
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack {
+                        if showingKey {
+                            TextField("sk-ant-...", text: $apiKey)
+                                .font(.system(.subheadline, design: .monospaced))
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                        } else {
+                            SecureField("sk-ant-...", text: $apiKey)
+                                .font(.system(.subheadline, design: .monospaced))
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                        }
+
+                        Button {
+                            showingKey.toggle()
+                        } label: {
+                            Image(systemName: showingKey ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Anthropic API Key")
+                } footer: {
+                    Text("Required for the Chat tab. The key is stored locally on your device. Get one at console.anthropic.com.")
+                }
+
                 Section("Data Sources") {
                     SourceInfoRow(
                         name: "OpenAlex",
@@ -49,7 +79,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Text("This app queries academic APIs directly. No API keys are required for basic use. Results are not cached between sessions.")
+                    Text("The Chat tab uses Claude to orchestrate searches across academic APIs. The Search and Authors tabs query APIs directly with no API key needed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

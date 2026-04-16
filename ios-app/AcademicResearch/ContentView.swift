@@ -1,9 +1,14 @@
 import SwiftUI
 
-/// Root view with tab navigation.
+/// Root view with tab navigation. Chat (LLM-orchestrated) is the primary tab.
 struct ContentView: View {
     var body: some View {
         TabView {
+            ChatView()
+                .tabItem {
+                    Label("Chat", systemImage: "sparkles")
+                }
+
             SearchView()
                 .tabItem {
                     Label("Search", systemImage: "magnifyingglass")
