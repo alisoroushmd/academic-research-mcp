@@ -1152,6 +1152,12 @@ if __name__ == "__main__":
             "and OpenAlex/CrossRef will use lower rate limits."
         )
 
+    # Self-reap when launcher chain (Claude.app disclaimer / uv / uvx) exits
+    # without propagating stdin-close. See _orphan_watchdog.py.
+    from _orphan_watchdog import install as _install_watchdog
+
+    _install_watchdog()
+
     # Clean up expired cache entries on startup
     cache.cleanup()
     mcp.run()

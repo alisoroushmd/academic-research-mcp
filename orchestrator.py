@@ -9,7 +9,6 @@ find_paper resolves any identifier (DOI, PMID, title, arXiv ID, URL)
 through the cheapest path without the caller needing to know which tool to use.
 """
 
-import json
 import re
 import logging
 import time
@@ -23,7 +22,7 @@ import crossref_client as cr
 import arxiv_client
 import medrxiv_client
 import pubmed_client
-from utils import title_similarity, has_medical_terms, _GENERIC_WORDS, _MEDICAL_TERMS
+from utils import title_similarity, has_medical_terms
 
 logger = logging.getLogger(__name__)
 

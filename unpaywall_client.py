@@ -9,9 +9,8 @@ No API key required — just an email address. Uses the same OPENALEX_EMAIL env 
 Rate limit: 100,000 requests/day.
 """
 
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import http_client
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
