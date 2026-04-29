@@ -66,12 +66,12 @@ def install(
         try:
             sys.stderr.write(f"[orphan_watchdog] {reason}; shutting down\n")
             sys.stderr.flush()
-        except Exception:
+        except Exception:  # nosec B110 -- best-effort logging during shutdown; failure must not block os._exit
             pass
         if on_shutdown is not None:
             try:
                 on_shutdown()
-            except Exception:
+            except Exception:  # nosec B110 -- caller-supplied cleanup is best-effort; never block shutdown
                 pass
         os._exit(0)
 
@@ -80,7 +80,7 @@ def install(
             time.sleep(poll_interval)
             try:
                 current_ppid = os.getppid()
-            except Exception:
+            except Exception:  # nosec B112 -- transient OS errors must not kill the watchdog thread; retry next poll
                 continue
             if current_ppid != initial_ppid or current_ppid == 1:
                 _exit(
