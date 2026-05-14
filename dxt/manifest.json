@@ -1,0 +1,61 @@
+{
+  "mcpb_version": "0.1",
+  "name": "academic-research-mcp",
+  "display_name": "Academic Research",
+  "version": "0.1.0",
+  "description": "Search 9 academic databases — PubMed, arXiv, OpenAlex, Semantic Scholar, medRxiv/bioRxiv, CrossRef, Google Scholar, ORCID, Unpaywall — with 25 tools and systematic review support.",
+  "long_description": "Unified MCP server for biomedical and CS literature search. Provides 25 tools across 9 APIs with local caching, PRISMA-compliant systematic review workflows, citation graph harvesting, and legal open-access PDF resolution. No API keys required for basic use.",
+  "author": {
+    "name": "Ali Soroush",
+    "email": "ali.soroush.2012@gmail.com",
+    "url": "https://github.com/alisoroushmd"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alisoroushmd/academic-research-mcp"
+  },
+  "homepage": "https://github.com/alisoroushmd/academic-research-mcp",
+  "license": "MIT",
+  "keywords": ["academic", "research", "pubmed", "arxiv", "literature", "systematic-review", "biomedical"],
+  "server": {
+    "type": "python",
+    "mcp_config": {
+      "command": "uvx",
+      "args": ["academic-research-mcp"],
+      "env": {
+        "OPENALEX_EMAIL": "${user_config.openalex_email}",
+        "S2_API_KEY": "${user_config.s2_api_key}",
+        "NCBI_API_KEY": "${user_config.ncbi_api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "openalex_email": {
+      "type": "string",
+      "title": "Email (OpenAlex / CrossRef polite pool)",
+      "description": "Registers you for the 10 req/sec polite pool on OpenAlex and faster CrossRef responses. Also required for Unpaywall PDF resolution.",
+      "required": false
+    },
+    "s2_api_key": {
+      "type": "string",
+      "title": "Semantic Scholar API key",
+      "description": "Optional. Raises rate limit from 100 req/5 min to 1 req/sec sustained. Get one free at semanticscholar.org.",
+      "required": false,
+      "sensitive": true
+    },
+    "ncbi_api_key": {
+      "type": "string",
+      "title": "NCBI / PubMed API key",
+      "description": "Optional. Raises PubMed rate limit from 3 req/sec to 10 req/sec. Get one free at ncbi.nlm.nih.gov/account.",
+      "required": false,
+      "sensitive": true
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "runtime": {
+      "name": "python",
+      "version": ">=3.10"
+    }
+  }
+}

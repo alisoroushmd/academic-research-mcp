@@ -25,30 +25,27 @@ No API keys required for basic use. Optional environment variables for higher th
 | `CROSSREF_EMAIL` | CrossRef polite pool: faster responses (falls back to `OPENALEX_EMAIL`) |
 | `NCBI_API_KEY` | PubMed: 3/sec -> 10/sec |
 
-## Quick Start
+## Installation
 
-```bash
-git clone https://github.com/alisoroushmd/academic-research-mcp.git
-cd academic-research-mcp
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python server.py
-```
+### Option 1 — One-click (Claude Desktop)
 
-## Claude Desktop Configuration
+Download [`academic-research-mcp.dxt`](https://github.com/alisoroushmd/academic-research-mcp/releases/latest/download/academic-research-mcp.dxt) and double-click it. Claude Desktop will prompt you for optional API keys and restart automatically.
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+### Option 2 — `uvx` (Claude Code, Cursor, any MCP client)
+
+No install step — `uvx` fetches and runs the package in an isolated environment on first use.
+
+Add to your MCP config (`.claude/mcp.json`, `cursor_mcp.json`, etc.):
 
 ```json
 {
   "mcpServers": {
     "academic-research": {
-      "command": "/path/to/academic-research-mcp/venv/bin/python",
-      "args": ["/path/to/academic-research-mcp/server.py"],
+      "command": "uvx",
+      "args": ["academic-research-mcp"],
       "env": {
-        "S2_API_KEY": "your-key-here",
         "OPENALEX_EMAIL": "your-email@institution.edu",
+        "S2_API_KEY": "your-key-here",
         "NCBI_API_KEY": "your-ncbi-key-here"
       }
     }
@@ -56,7 +53,23 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop after saving.
+Requires [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+
+### Option 3 — `pip install`
+
+```bash
+pip install academic-research-mcp
+academic-research-mcp  # runs the server
+```
+
+### Option 4 — From source
+
+```bash
+git clone https://github.com/alisoroushmd/academic-research-mcp.git
+cd academic-research-mcp
+pip install -e .
+academic-research-mcp
+```
 
 ## All 25 Tools
 

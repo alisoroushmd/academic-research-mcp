@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "academic-research-mcp"
+version = "0.1.0"
+description = "MCP server for academic literature search across 9 APIs (OpenAlex, Semantic Scholar, PubMed, arXiv, medRxiv/bioRxiv, CrossRef, Google Scholar, ORCID, Unpaywall)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ali Soroush", email = "ali.soroush.2012@gmail.com" }]
+requires-python = ">=3.10"
+keywords = ["mcp", "academic", "research", "pubmed", "arxiv", "literature", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "requests>=2.31,<3",
+    "mcp>=1.0,<2",
+    "scholarly>=1.7,<2",
+    "httpx[socks]>=0.24,<1",
+    "pip-system-certs>=4.0",
+    "defusedxml>=0.7.1",
+]
+
+[project.scripts]
+academic-research-mcp = "server:main"
+
+[project.urls]
+Homepage = "https://github.com/alisoroushmd/academic-research-mcp"
+Repository = "https://github.com/alisoroushmd/academic-research-mcp"
+Issues = "https://github.com/alisoroushmd/academic-research-mcp/issues"
+
+[tool.setuptools]
+py-modules = [
+    "_orphan_watchdog",
+    "arxiv_client",
+    "cache",
+    "crossref_client",
+    "db",
+    "formatters",
+    "google_scholar_client",
+    "http_client",
+    "medrxiv_client",
+    "openalex_client",
+    "orchestrator",
+    "orcid_client",
+    "pubmed_client",
+    "review_manager",
+    "semantic_scholar_client",
+    "server",
+    "unpaywall_client",
+    "utils",
+]

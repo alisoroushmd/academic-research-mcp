@@ -1143,7 +1143,7 @@ async def prisma_counts(review_id: str) -> Dict[str, Any]:
 
 # ============================================================================
 
-if __name__ == "__main__":
+def main():
     import os
 
     if not os.environ.get("OPENALEX_EMAIL"):
@@ -1161,3 +1161,7 @@ if __name__ == "__main__":
     # Clean up expired cache entries on startup
     cache.cleanup()
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
