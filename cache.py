@@ -41,6 +41,8 @@ def _ensure_cache_table() -> None:
         return
     conn = _db.get_db()
     with _lock:
+        if _tables_created:
+            return
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cache (
                 key TEXT PRIMARY KEY,
@@ -55,7 +57,7 @@ def _ensure_cache_table() -> None:
             ON cache(category)
         """)
         conn.commit()
-    _tables_created = True
+        _tables_created = True
 
 
 def make_key(prefix: str, *args, **kwargs) -> str:

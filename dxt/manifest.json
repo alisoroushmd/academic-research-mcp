@@ -24,6 +24,7 @@
       "args": ["academic-research-mcp"],
       "env": {
         "OPENALEX_EMAIL": "${user_config.openalex_email}",
+        "CROSSREF_EMAIL": "${user_config.crossref_email}",
         "S2_API_KEY": "${user_config.s2_api_key}",
         "NCBI_API_KEY": "${user_config.ncbi_api_key}"
       }
@@ -34,7 +35,8 @@
       "type": "string",
       "title": "Email (OpenAlex / CrossRef polite pool)",
       "description": "Registers you for the 10 req/sec polite pool on OpenAlex and faster CrossRef responses. Also required for Unpaywall PDF resolution.",
-      "required": false
+      "required": false,
+      "sensitive": true
     },
     "s2_api_key": {
       "type": "string",
@@ -47,6 +49,13 @@
       "type": "string",
       "title": "NCBI / PubMed API key",
       "description": "Optional. Raises PubMed rate limit from 3 req/sec to 10 req/sec. Get one free at ncbi.nlm.nih.gov/account.",
+      "required": false,
+      "sensitive": true
+    },
+    "crossref_email": {
+      "type": "string",
+      "title": "Email (CrossRef polite pool, optional override)",
+      "description": "Optional. Use only if you want a different email for CrossRef than for OpenAlex. Defaults to the OpenAlex email if left blank.",
       "required": false,
       "sensitive": true
     }

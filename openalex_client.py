@@ -189,6 +189,7 @@ def search_authors(
     return authors
 
 
+@cache.cached(category="author", ttl=cache.AUTHOR_TTL)
 def get_author(author_id: str) -> Dict[str, Any]:
     """
     Get detailed author information from OpenAlex.
@@ -236,6 +237,7 @@ def get_author(author_id: str) -> Dict[str, Any]:
     }
 
 
+@cache.cached(category="search", ttl=cache.SEARCH_TTL)
 def get_author_works(
     author_id: str,
     num_results: int = 20,

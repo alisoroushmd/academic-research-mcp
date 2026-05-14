@@ -22,6 +22,11 @@ _session = None
 DEFAULT_TIMEOUT = 15  # seconds
 BATCH_TIMEOUT = 30  # for batch/bulk endpoints
 
+_USER_AGENT = (
+    "academic-research-mcp/0.1.0 "
+    "(+https://github.com/alisoroushmd/academic-research-mcp)"
+)
+
 
 def get_session() -> requests.Session:
     """
@@ -45,6 +50,7 @@ def get_session() -> requests.Session:
             pool_maxsize=20,
         )
         _session.mount("https://", adapter)
+        _session.headers.update({"User-Agent": _USER_AGENT})
 
     return _session
 
@@ -103,6 +109,7 @@ def get_async_client() -> httpx.AsyncClient:
             transport=_get_async_transport(),
             timeout=httpx.Timeout(DEFAULT_TIMEOUT, connect=10.0),
             follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
         )
     return _async_client
 

@@ -176,10 +176,12 @@ The same database stores systematic review state (reviews, papers, searches) in 
 ## Dependencies
 
 - Python 3.10+
-- [scholarly](https://github.com/scholarly-python-package/scholarly) -- Google Scholar access
 - [mcp](https://github.com/modelcontextprotocol/python-sdk) -- Model Context Protocol SDK
 - [requests](https://docs.python-requests.org/) -- HTTP client
-- [httpx[socks]](https://www.python-httpx.org/) -- SOCKS proxy support for scholarly
+- [httpx[socks]](https://www.python-httpx.org/) -- async HTTP client with SOCKS proxy support
+- [scholarly](https://github.com/scholarly-python-package/scholarly) -- Google Scholar access
+- [defusedxml](https://github.com/tiran/defusedxml) -- safe XML parsing (PubMed / arXiv responses)
+- [pip-system-certs](https://pypi.org/project/pip-system-certs/) -- uses OS certificate store for corporate/VPN environments
 
 ## License
 

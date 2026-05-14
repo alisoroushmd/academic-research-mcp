@@ -27,10 +27,8 @@ def reset_review_manager_state(tmp_db_dir):
     import review_manager
 
     review_manager._tables_initialized = False
-    review_manager._active_review_id = None
     yield
     review_manager._tables_initialized = False
-    review_manager._active_review_id = None
 
 
 # ---------------------------------------------------------------------------

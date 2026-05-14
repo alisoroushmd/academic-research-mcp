@@ -7,6 +7,7 @@ data about researchers including employment history, publications, funding,
 and education.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 import cache
@@ -34,12 +35,16 @@ def search_orcid(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
     resp.raise_for_status()
     data = resp.json()
 
-    results = []
-    for item in data.get("result", []):
-        orcid_id = item.get("orcid-identifier", {}).get("path", "")
-        # Fetch minimal profile for each result
-        profile = _get_minimal_profile(orcid_id)
-        results.append(profile)
+    orcid_ids = [
+        item.get("orcid-identifier", {}).get("path", "")
+        for item in data.get("result", [])
+        if item.get("orcid-identifier", {}).get("path")
+    ]
+    if not orcid_ids:
+        return []
+    with ThreadPoolExecutor(max_workers=min(len(orcid_ids), 5)) as pool:
+        futures = [pool.submit(_get_minimal_profile, oid) for oid in orcid_ids]
+        results = [f.result() for f in futures]
 
     return results
 

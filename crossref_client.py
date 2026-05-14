@@ -59,13 +59,19 @@ def search_works(
 
     filters = []
     if year:
-        if "-" in year:
+        if year.startswith(">"):
+            yr = year[1:]
+            if re.fullmatch(r"\d{4}", yr):
+                filters.append(f"from-pub-date:{yr}")
+        elif year.startswith("<"):
+            yr = year[1:]
+            if re.fullmatch(r"\d{4}", yr):
+                filters.append(f"until-pub-date:{yr}")
+        elif re.fullmatch(r"\d{4}-\d{4}", year):
             start, end = year.split("-", 1)
-            if start:
-                filters.append(f"from-pub-date:{start}")
-            if end:
-                filters.append(f"until-pub-date:{end}")
-        else:
+            filters.append(f"from-pub-date:{start}")
+            filters.append(f"until-pub-date:{end}")
+        elif re.fullmatch(r"\d{4}", year):
             filters.append(f"from-pub-date:{year}")
             filters.append(f"until-pub-date:{year}")
 

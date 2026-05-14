@@ -29,7 +29,7 @@ No API keys required for basic use. Optional env vars:
   - NCBI_API_KEY: Higher PubMed rate limits (10 req/sec vs 3 req/sec)
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 import asyncio
 import logging
 
@@ -517,7 +517,7 @@ async def get_paper_network(
     paper_id: str,
     direction: str = "citations",
     num_results: int = 20,
-) -> List[Dict[str, Any]]:
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Get the citation network around a paper. Returns papers that cite it
     (forward), papers it references (backward), or both.
@@ -542,10 +542,13 @@ async def get_paper_network(
                 s2.get_paper_references, paper_id, num_results
             )
         elif direction == "both":
-            citations, references = await asyncio.gather(
+            results = await asyncio.gather(
                 asyncio.to_thread(s2.get_paper_citations, paper_id, num_results),
                 asyncio.to_thread(s2.get_paper_references, paper_id, num_results),
+                return_exceptions=True,
             )
+            citations = results[0] if not isinstance(results[0], Exception) else []
+            references = results[1] if not isinstance(results[1], Exception) else []
             return {
                 "citations": citations,
                 "references": references,

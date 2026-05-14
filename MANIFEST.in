@@ -1,0 +1,9 @@
+prune venv
+prune .venv
+prune build
+prune dist
+prune docs
+prune .github
+prune .pytest_cache
+prune .ruff_cache
+exclude .DS_Store
