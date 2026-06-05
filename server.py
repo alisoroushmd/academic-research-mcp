@@ -715,6 +715,20 @@ async def open_access(
     Pass a single DOI for full resolution details, or multiple DOIs for a
     batch status check.
 
+    Resolution is by DOI only — there is no title/PMID fallback. If a paper you
+    expect to be open access comes back without a PDF, check the `error_type`
+    before assuming an outage:
+      - "config"          → OPENALEX_EMAIL is unset/placeholder/malformed (a
+                            server-config problem, NOT a paper problem; also
+                            flagged with config_issue=True). Fix the email and
+                            restart the server.
+      - "invalid_doi"     → the DOI was empty/malformed; resolve a real DOI via
+                            find_paper or smart_search first.
+      - "not_in_unpaywall"→ the DOI and email are valid; the paper simply is not
+                            in Unpaywall's OA index. Try the publisher page.
+      - "api_error"       → transient Unpaywall HTTP error; retry.
+    A clean hit has no `error_type` and carries is_oa / pdf_url.
+
     Args:
         dois: List of DOI strings (1 for full details, up to 50 for batch check).
               Examples: ["10.1038/s41591-023-02437-x"] or
