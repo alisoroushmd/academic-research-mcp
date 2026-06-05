@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`open_access` failure modes are now self-diagnosing.** Previously a missing/placeholder `OPENALEX_EMAIL`, an empty/invalid DOI, and a DOI genuinely absent from Unpaywall all collapsed into an indistinguishable `is_oa=False` / empty `pdf_url` (especially in batch mode, where `batch_check_oa` silently discarded the underlying `error`). This made a config problem look like a global "nothing is open access" outage. Each result now carries an `error_type` (`config` / `invalid_doi` / `not_in_unpaywall` / `api_error`), config problems also set `config_issue: True`, and placeholder emails (`example.com`, `your-email`, `changeme`, …) plus malformed addresses and Unpaywall `422` responses are detected and reported with an actionable message. (`unpaywall_client.py`, `tests/test_unpaywall_client.py`)
+
 - **`openalex_email` now stored as a sensitive field in the DXT manifest.** Previously displayed as plain text in the Claude Desktop UI. (`dxt/manifest.json`)
 
 - **CrossRef year filter now handles `>2021` / `<2020` prefix syntax.** Previously silently emitted a malformed filter value and returned no results; ISO-date strings like `"2020-01-01"` now also fail gracefully instead of producing a wrong query. (`crossref_client.py`)

@@ -15,6 +15,89 @@ import http_client
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
 
+# Substrings that mark an email as a stand-in rather than a real contact address.
+# Unpaywall ignores/blocks placeholder addresses, so passing one looks exactly
+# like a global outage ("nothing resolves") unless we flag it up front.
+_PLACEHOLDER_EMAIL_FRAGMENTS = (
+    "example.com",
+    "example.org",
+    "example.net",
+    "your-email",
+    "your_email",
+    "youremail",
+    "yourname",
+    "changeme",
+    "change-me",
+    "placeholder",
+    "noreply",
+    "no-reply",
+    "test@test",
+    "user@domain",
+    "email@email",
+    "foo@bar",
+)
+
+
+def _validate_contact_email(email: str) -> tuple[str, str]:
+    """
+    Classify a contact email for Unpaywall/OpenAlex use.
+
+    Returns:
+        (problem, email) where problem is "" when the address is usable, or one
+        of "no_email" / "malformed_email" / "placeholder_email" otherwise. The
+        normalized email is returned so callers can echo it in diagnostics.
+    """
+    email = (email or "").strip()
+    if not email:
+        return "no_email", email
+    low = email.lower()
+    # Minimal shape check: local@domain.tld
+    if "@" not in low or "." not in low.rsplit("@", 1)[-1]:
+        return "malformed_email", email
+    if any(fragment in low for fragment in _PLACEHOLDER_EMAIL_FRAGMENTS):
+        return "placeholder_email", email
+    return "", email
+
+
+def _resolve_contact_email() -> tuple[str, str]:
+    """Read OPENALEX_EMAIL (fallback CROSSREF_EMAIL) and validate it.
+
+    Returns (problem, email); see _validate_contact_email.
+    """
+    raw = http_client.get_env("OPENALEX_EMAIL", http_client.get_env("CROSSREF_EMAIL"))
+    return _validate_contact_email(raw)
+
+
+_EMAIL_PROBLEM_MESSAGES = {
+    "no_email": (
+        "OPENALEX_EMAIL is not set, so Unpaywall open-access resolution is "
+        "disabled. Set OPENALEX_EMAIL (or CROSSREF_EMAIL) to a real contact "
+        "email in the MCP server environment, then restart the server."
+    ),
+    "malformed_email": (
+        "OPENALEX_EMAIL ({email!r}) is not a valid email address. Unpaywall "
+        "requires a real contact email; set OPENALEX_EMAIL to a working address "
+        "and restart the server."
+    ),
+    "placeholder_email": (
+        "OPENALEX_EMAIL ({email!r}) looks like a placeholder. Unpaywall "
+        "ignores/blocks placeholder addresses, which makes every lookup fail as "
+        "if no paper were open access. Set OPENALEX_EMAIL to your real contact "
+        "email and restart the server."
+    ),
+}
+
+
+def _config_error(problem: str, email: str) -> Dict[str, Any]:
+    """Build a self-explaining config error for an email problem."""
+    return {
+        "error": _EMAIL_PROBLEM_MESSAGES[problem].format(email=email),
+        "error_type": "config",
+        "config_issue": True,
+        "found": False,
+        "pdf_url": None,
+    }
+
 
 def get_paper_pdf(doi: str) -> Dict[str, Any]:
     """
@@ -34,11 +117,20 @@ def get_paper_pdf(doi: str) -> Dict[str, Any]:
     """
     doi = _clean_doi(doi)
     if not doi:
-        return {"error": "Invalid DOI format"}
+        return {
+            "error": (
+                "Invalid or empty DOI. open_access resolves PDFs by DOI only; "
+                "resolve a real DOI first via find_paper or smart_search, then "
+                "pass that DOI here."
+            ),
+            "error_type": "invalid_doi",
+            "found": False,
+            "pdf_url": None,
+        }
 
-    email = http_client.get_env("OPENALEX_EMAIL", http_client.get_env("CROSSREF_EMAIL"))
-    if not email:
-        return {"error": "No email configured. Set OPENALEX_EMAIL environment variable."}
+    problem, email = _resolve_contact_email()
+    if problem:
+        return _config_error(problem, email)
 
     url = f"{UNPAYWALL_BASE}/{doi}"
     params = {"email": email}
@@ -52,13 +144,28 @@ def get_paper_pdf(doi: str) -> Dict[str, Any]:
         return {
             "doi": doi,
             "found": False,
+            "is_oa": False,
             "pdf_url": None,
-            "message": "DOI not found in Unpaywall. Try the publisher page.",
+            "error_type": "not_in_unpaywall",
+            "message": (
+                "DOI not indexed by Unpaywall (the DOI and contact email are "
+                "valid; this paper simply is not in Unpaywall's OA index). Try "
+                "the publisher page."
+            ),
             "publisher_url": f"https://doi.org/{doi}",
         }
 
+    if resp.status_code == 422:
+        # Unpaywall returns 422 specifically for a bad/invalid email parameter.
+        return _config_error("malformed_email", email)
+
     if resp.status_code != 200:
-        return {"error": f"Unpaywall API error: {resp.status_code}"}
+        return {
+            "error": f"Unpaywall API error: {resp.status_code}",
+            "error_type": "api_error",
+            "found": False,
+            "pdf_url": None,
+        }
 
     data = resp.json()
 
@@ -158,18 +265,42 @@ def batch_check_oa(dois: List[str]) -> List[Dict[str, Any]]:
         idx, raw_doi = idx_doi
         doi = _clean_doi(raw_doi)
         if not doi:
-            return idx, {"doi": raw_doi, "error": "Invalid DOI"}
+            return idx, {
+                "doi": raw_doi,
+                "is_oa": False,
+                "pdf_url": None,
+                "error": (
+                    "Invalid or empty DOI. Resolve a real DOI via find_paper or "
+                    "smart_search before checking open access."
+                ),
+                "error_type": "invalid_doi",
+            }
         try:
             result = get_paper_pdf(doi)
+            # Preserve diagnostic errors (config / API / not-indexed) instead of
+            # flattening them into a silent is_oa=False, which is what made a
+            # config problem look like a global "nothing is open access" outage.
+            if result.get("error"):
+                item = {
+                    "doi": doi,
+                    "is_oa": False,
+                    "pdf_url": None,
+                    "error": result["error"],
+                    "error_type": result.get("error_type", "error"),
+                }
+                if result.get("config_issue"):
+                    item["config_issue"] = True
+                return idx, item
             return idx, {
                 "doi": doi,
                 "is_oa": result.get("is_oa", False),
                 "pdf_url": result.get("pdf_url"),
                 "source": result.get("source", "none"),
+                "found": result.get("found", True),
                 "message": result.get("message", ""),
             }
         except Exception as e:
-            return idx, {"doi": doi, "error": str(e)}
+            return idx, {"doi": doi, "error": str(e), "error_type": "exception"}
 
     results = [None] * len(dois)
     with ThreadPoolExecutor(max_workers=10) as executor:
