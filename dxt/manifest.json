@@ -36,7 +36,7 @@
       "title": "Email (OpenAlex / CrossRef polite pool)",
       "description": "Registers you for the 10 req/sec polite pool on OpenAlex and faster CrossRef responses. Also required for Unpaywall PDF resolution.",
       "required": false,
-      "sensitive": true
+      "sensitive": false
     },
     "s2_api_key": {
       "type": "string",
@@ -57,7 +57,7 @@
       "title": "Email (CrossRef polite pool, optional override)",
       "description": "Optional. Use only if you want a different email for CrossRef than for OpenAlex. Defaults to the OpenAlex email if left blank.",
       "required": false,
-      "sensitive": true
+      "sensitive": false
     }
   },
   "tools_generated": true,
