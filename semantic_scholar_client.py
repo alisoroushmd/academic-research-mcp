@@ -88,7 +88,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     Returns:
         Dict with full paper details including abstract, references, citations.
     """
-    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}"
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe=':')}"
     params = {
         "fields": "title,authors,year,citationCount,abstract,externalIds,venue,"
         "openAccessPdf,publicationTypes,journal,influentialCitationCount,"
@@ -140,7 +140,7 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
     Returns:
         List of citing paper dicts.
     """
-    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/citations"
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe=':')}/citations"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
@@ -164,7 +164,7 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
     Returns:
         List of referenced paper dicts.
     """
-    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/references"
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe=':')}/references"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
@@ -282,7 +282,7 @@ def get_recommended_papers(
     Returns:
         List of recommended paper dicts.
     """
-    url = f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{quote(paper_id, safe='')}"
+    url = f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{quote(paper_id, safe=':')}"
     params = {
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds,abstract",
