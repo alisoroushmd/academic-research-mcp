@@ -6,6 +6,9 @@ import sys
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+import requests
+
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -189,3 +192,135 @@ def test_search_pubmed_end_to_end(tmp_db_dir):
     )
     assert paper["doi"] == "10.1016/j.gie.2024.001"
     assert paper["year"] == 2024
+
+
+# ---------------------------------------------------------------------------
+# Error sanitization — the api_key rides in the URL query string, and the
+# server returns str(exception) to the MCP client, so HTTP error messages
+# must never contain the query string.
+# ---------------------------------------------------------------------------
+
+_URL_WITH_KEY = (
+    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    "?db=pubmed&api_key=SECRET-KEY-123&term=cancer"
+)
+
+
+def test_esearch_http_error_redacts_query_string():
+    """esearch() errors must not leak the NCBI api_key or any query params."""
+    mock_resp = _make_mock_response(json_data={}, status_code=500)
+    mock_resp.url = _URL_WITH_KEY
+
+    with patch("http_client.get", return_value=mock_resp):
+        with pytest.raises(requests.HTTPError) as exc_info:
+            pubmed_client.esearch("cancer")
+
+    msg = str(exc_info.value)
+    assert "SECRET-KEY-123" not in msg
+    assert "api_key" not in msg
+    assert "?" not in msg
+    assert "500" in msg
+
+
+def test_efetch_http_error_redacts_query_string():
+    """efetch() errors must not leak the NCBI api_key or any query params."""
+    mock_resp = _make_mock_response(content=b"", status_code=403)
+    mock_resp.url = _URL_WITH_KEY.replace("esearch", "efetch")
+
+    with patch("http_client.get", return_value=mock_resp):
+        with pytest.raises(requests.HTTPError) as exc_info:
+            pubmed_client.efetch(pmids=["39876543"])
+
+    msg = str(exc_info.value)
+    assert "SECRET-KEY-123" not in msg
+    assert "api_key" not in msg
+    assert "403" in msg
+
+
+# ---------------------------------------------------------------------------
+# Pagination — results are capped at one EFetch batch per call; callers page
+# with offset instead of receiving the entire result set in one response.
+# ---------------------------------------------------------------------------
+
+
+def _paged_side_effect(esearch_json, calls):
+    """Record (url, params) per request; serve canned ESearch/EFetch bodies."""
+
+    def side_effect(url, **kwargs):
+        calls.append((url, kwargs.get("params", {})))
+        if "esearch" in url:
+            return _make_mock_response(json_data=esearch_json)
+        return _make_mock_response(content=EFETCH_XML)
+
+    return side_effect
+
+
+def test_search_pubmed_caps_results_at_one_page(tmp_db_dir):
+    """max_results clamps to 200 and exactly one EFetch batch is issued."""
+    esearch_json = {
+        "esearchresult": {
+            "count": "10000",
+            "idlist": [str(i) for i in range(200)],
+            "webenv": "MCID_abc123webenv",
+            "querykey": "1",
+            "querytranslation": "cancer",
+        }
+    }
+    calls = []
+    with patch("http_client.get", side_effect=_paged_side_effect(esearch_json, calls)):
+        result = pubmed_client.search_pubmed("cancer", max_results=10000)
+
+    esearch_calls = [c for c in calls if "esearch" in c[0]]
+    efetch_calls = [c for c in calls if "efetch" in c[0]]
+    assert len(esearch_calls) == 1
+    assert esearch_calls[0][1]["retmax"] == 200
+    assert len(efetch_calls) == 1  # no batch loop fetching all 10000 records
+    assert efetch_calls[0][1]["retmax"] == 200
+    assert result["total_count"] == 10000
+    assert result["offset"] == 0
+    assert result["has_more"] is True
+
+
+def test_search_pubmed_offset_requests_later_page(tmp_db_dir):
+    """offset flows to ESearch retstart and EFetch retstart."""
+    calls = []
+    with patch("http_client.get", side_effect=_paged_side_effect(ESEARCH_JSON, calls)):
+        result = pubmed_client.search_pubmed("cancer", max_results=200, offset=200)
+
+    esearch_calls = [c for c in calls if "esearch" in c[0]]
+    efetch_calls = [c for c in calls if "efetch" in c[0]]
+    assert esearch_calls[0][1]["retstart"] == 200
+    assert efetch_calls[0][1]["retstart"] == 200
+    assert result["offset"] == 200
+    assert result["returned"] == 1  # EFETCH_XML contains one article
+    assert result["has_more"] is True  # 200 + 1 < 2847
+
+
+def test_search_pubmed_last_page_has_more_false(tmp_db_dir):
+    """When the page reaches total_count, has_more is False."""
+    esearch_json = {
+        "esearchresult": {
+            "count": "1",
+            "idlist": ["39876543"],
+            "webenv": "MCID_abc123webenv",
+            "querykey": "1",
+            "querytranslation": "cancer",
+        }
+    }
+    calls = []
+    with patch("http_client.get", side_effect=_paged_side_effect(esearch_json, calls)):
+        result = pubmed_client.search_pubmed("cancer")
+
+    assert result["returned"] == 1
+    assert result["has_more"] is False
+
+
+def test_search_pubmed_cache_is_keyed_by_offset(tmp_db_dir):
+    """Different offsets must produce different cache entries, not collide."""
+    calls = []
+    with patch("http_client.get", side_effect=_paged_side_effect(ESEARCH_JSON, calls)):
+        pubmed_client.search_pubmed("cancer", max_results=200, offset=0)
+        pubmed_client.search_pubmed("cancer", max_results=200, offset=200)
+
+    esearch_calls = [c for c in calls if "esearch" in c[0]]
+    assert len(esearch_calls) == 2  # second offset was a cache miss, as it must be

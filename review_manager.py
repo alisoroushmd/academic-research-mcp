@@ -8,6 +8,7 @@ in the shared SQLite database.
 
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,20 @@ def _ensure_tables():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_rp_status ON review_papers(review_id, status)"
         )
+        # DB-level dedup backstop: the Python duplicate check can't see
+        # concurrent inserts from another server process sharing this DB.
+        # Creation fails on a legacy DB that already holds duplicate DOIs;
+        # in that case dedup falls back to the Python check alone.
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_review_doi_unique "
+                "ON review_papers(review_id, LOWER(doi)) WHERE doi != ''"
+            )
+        except (sqlite3.IntegrityError, sqlite3.OperationalError) as e:
+            logger.warning(
+                f"Could not create unique (review_id, doi) index — the "
+                f"database already contains duplicate DOIs: {e}"
+            )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -231,8 +246,10 @@ def add_papers(
             year = paper.get("year")
             metadata = json.dumps(paper)
 
-            conn.execute(
-                """INSERT INTO review_papers
+            # OR IGNORE defers to the unique (review_id, doi) index when a
+            # concurrent process inserted the same DOI after our check above.
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO review_papers
                    (id, review_id, doi, pmid, title, authors, year, source, search_id, added_at, status, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
                 (
@@ -249,7 +266,8 @@ def add_papers(
                     metadata,
                 ),
             )
-            new_count += 1
+            if cursor.rowcount:
+                new_count += 1
 
         conn.commit()
         conn.execute("UPDATE reviews SET updated_at = ? WHERE id = ?", (now, review_id))
@@ -436,6 +454,32 @@ def get_active_review() -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+def get_active_review_info() -> Optional[Dict[str, Any]]:
+    """
+    Return id/name/age for the persisted active review, or None.
+
+    The active review is sticky across server restarts, so startup uses this
+    to warn when a review from a past session would silently keep
+    auto-logging every new search.
+    """
+    review_id = get_active_review()
+    if not review_id:
+        return None
+    conn = _db.get_db()
+    with _lock:
+        row = conn.execute(
+            "SELECT name, updated_at FROM reviews WHERE id = ?", (review_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": review_id,
+        "name": row[0],
+        "updated_at": row[1],
+        "age_days": max(0.0, (time.time() - row[1]) / 86400.0),
+    }
 
 
 def update_search_new_count(search_id: str, new_count: int) -> None:

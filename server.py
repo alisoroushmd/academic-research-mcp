@@ -34,6 +34,7 @@ import asyncio
 import logging
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 import google_scholar_client as gs
 import orcid_client
@@ -198,7 +199,8 @@ async def search_papers(
     author: Optional[str] = None,
     year_range: Optional[tuple] = None,
     server: Literal["medrxiv", "biorxiv"] = "medrxiv",
-) -> List[Dict[str, Any]]:
+    offset: int = 0,
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Search a specific academic database. Use this when you need control over
     which source to query, or use smart_search for automatic multi-source search.
@@ -217,7 +219,7 @@ async def search_papers(
                '"intestinal metaplasia"[MeSH] AND "deep learning"[ti]'
         source: API to search. Options: "openalex" (default), "s2", "crossref",
                 "arxiv", "medrxiv", "google_scholar", "pubmed".
-        num_results: Number of results (default: 10, max: 200; pubmed max: 10000)
+        num_results: Number of results per call (default: 10, max: 200)
         year: Year filter (e.g., "2020-2025")
         brief: Return compact results (default: True)
         fields_of_study: [S2 only] Filter by field (e.g., ["Medicine", "Computer Science"])
@@ -230,10 +232,14 @@ async def search_papers(
         author: [Google Scholar] Author name filter
         year_range: [Google Scholar] Tuple of (start_year, end_year)
         server: [medRxiv/bioRxiv] Which server to search (default: "medrxiv")
+        offset: [PubMed only] Pagination offset (E-utilities retstart). PubMed
+                returns a dict with papers plus total_count / returned /
+                has_more; to page through a large result set, call again with
+                offset advanced by `returned` until has_more is false.
     """
     query = _sanitize_query(query)
-    max_for_source = 10000 if source == "pubmed" else 200
-    num_results = _clamp(num_results, 1, max_for_source)
+    num_results = _clamp(num_results, 1, 200)
+    offset = max(0, offset)
     logger.info(f"Search papers: query={_log_query(query)}, source={source}")
 
     try:
@@ -291,7 +297,7 @@ async def search_papers(
                 )
         elif source == "pubmed":
             result = await asyncio.to_thread(
-                pubmed_client.search_pubmed, query, num_results
+                pubmed_client.search_pubmed, query, num_results, offset
             )
             results = result.get("papers", [])
         else:
@@ -316,6 +322,17 @@ async def search_papers(
             )
             review_manager.update_search_new_count(search_id, new_count)
 
+        if source == "pubmed":
+            # Surface pagination metadata so clients can page instead of
+            # requesting the entire result set in one response.
+            return {
+                "papers": _compact_list(results, brief),
+                "total_count": result.get("total_count", len(results)),
+                "query_translation": result.get("query_translation", ""),
+                "offset": result.get("offset", offset),
+                "returned": result.get("returned", len(results)),
+                "has_more": result.get("has_more", False),
+            }
         return _compact_list(results, brief)
     except Exception as e:
         return _error_list(f"Search failed ({source}): {str(e)}")
@@ -893,7 +910,7 @@ async def reviews(review_id: Optional[str] = None) -> Any:
         return _error_dict(f"Reviews failed: {str(e)}")
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 async def delete_review(review_id: str) -> Dict[str, Any]:
     """
     Delete a review and all its associated papers and searches.
@@ -1174,6 +1191,17 @@ def main():
     from _orphan_watchdog import install as _install_watchdog
 
     _install_watchdog()
+
+    # The active review persists in SQLite across restarts, so a review
+    # activated weeks ago silently keeps auto-logging every search.
+    stale = review_manager.get_active_review_info()
+    if stale:
+        logger.warning(
+            f"Active review '{stale['name']}' ({stale['id']}) is still set "
+            f"from a previous session (last updated {stale['age_days']:.0f} "
+            f"days ago). All searches will auto-log to it. "
+            f"Call set_active_review(null) to deactivate."
+        )
 
     # Clean up expired cache entries on startup
     cache.cleanup()

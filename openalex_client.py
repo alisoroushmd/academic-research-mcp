@@ -84,7 +84,7 @@ def search_works(
         params["filter"] = ",".join(filters)
 
     resp = http_client.get(url, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return [_format_work(w) for w in data.get("results", [])]
@@ -111,7 +111,7 @@ def get_work(work_id: str) -> Dict[str, Any]:
     url = f"{OPENALEX_BASE}/works/{quote(work_id, safe=':')}"
     params = _params_with_email({})
     resp = http_client.get(url, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     work = _format_work(data)
@@ -157,7 +157,7 @@ def search_authors(
         }
     )
     resp = http_client.get(url, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     authors = []
@@ -207,7 +207,7 @@ def get_author(author_id: str) -> Dict[str, Any]:
     url = f"{OPENALEX_BASE}/authors/{quote(author_id, safe=':')}"
     params = _params_with_email({})
     resp = http_client.get(url, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     a = resp.json()
 
     last_institution = a.get("last_known_institutions", []) or a.get(
@@ -269,7 +269,7 @@ def get_author_works(
         }
     )
     resp = http_client.get(url, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return [_format_work(w) for w in data.get("results", [])]
@@ -288,7 +288,7 @@ def get_institution(institution_id: str) -> Dict[str, Any]:
     url = f"{OPENALEX_BASE}/institutions/{quote(institution_id, safe=':')}"
     params = _params_with_email({})
     resp = http_client.get(url, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     i = resp.json()
 
     return {

@@ -85,7 +85,7 @@ def search_works(
     params = {k: v for k, v in params.items() if v is not None}
 
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     items = data.get("message", {}).get("items", [])
@@ -108,7 +108,7 @@ def get_work_by_doi(doi: str) -> Dict[str, Any]:
 
     url = f"{CROSSREF_BASE}/works/{quote(doi, safe='')}"
     resp = http_client.get(url, headers=_headers())
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return _format_work(data.get("message", {}))
@@ -141,7 +141,7 @@ def search_by_author(
         params["query"] = query
 
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     items = data.get("message", {}).get("items", [])

@@ -317,3 +317,150 @@ def test_get_review_papers_pagination():
         review["id"], status_filter="screened_in"
     )
     assert len(screened_papers) == 0
+
+
+# ---------------------------------------------------------------------------
+# DB-level dedup backstop — unique (review_id, LOWER(doi)) index + OR IGNORE
+# ---------------------------------------------------------------------------
+
+
+def test_unique_doi_index_blocks_raw_duplicate_inserts():
+    """The unique index rejects same-review DOI duplicates even when the
+    Python-side check is bypassed (e.g., a concurrent process)."""
+    import json
+    import sqlite3
+    import time
+    import uuid
+
+    import db
+    import pytest
+    import review_manager
+
+    review = review_manager.create_review("Index test", "")
+    search_id = review_manager.log_search(review["id"], "openalex", "q", {}, 1, 0)
+    assert (
+        review_manager.add_papers(review["id"], search_id, [SAMPLE_PAPER], "openalex")
+        == 1
+    )
+
+    conn = db.get_db()
+    with pytest.raises(sqlite3.IntegrityError):
+        # Case-different DOI: the index is on LOWER(doi), so this collides.
+        conn.execute(
+            """INSERT INTO review_papers
+               (id, review_id, doi, pmid, title, authors, year, source, search_id, added_at, status, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+            (
+                str(uuid.uuid4()),
+                review["id"],
+                SAMPLE_PAPER["doi"].upper(),
+                "",
+                "Different title, same DOI",
+                json.dumps([]),
+                2021,
+                "s2",
+                search_id,
+                time.time(),
+                json.dumps({}),
+            ),
+        )
+
+
+def test_add_papers_survives_duplicate_race(monkeypatch):
+    """If the Python duplicate check misses (concurrent insert), OR IGNORE
+    drops the row silently and the paper is not double-counted."""
+    import review_manager
+
+    review = review_manager.create_review("Race test", "")
+    search_id = review_manager.log_search(review["id"], "openalex", "q", {}, 1, 0)
+    assert (
+        review_manager.add_papers(review["id"], search_id, [SAMPLE_PAPER], "openalex")
+        == 1
+    )
+
+    # Simulate the race: duplicate check sees nothing, index catches it.
+    monkeypatch.setattr(review_manager, "_is_duplicate", lambda *a, **k: False)
+    assert (
+        review_manager.add_papers(review["id"], search_id, [SAMPLE_PAPER], "openalex")
+        == 0
+    )
+
+    papers = review_manager.get_review_papers(review["id"])
+    assert len(papers) == 1
+
+
+def test_ensure_tables_warns_on_legacy_duplicate_dois(caplog):
+    """A legacy DB that already holds duplicate DOIs must not crash startup —
+    index creation is skipped with a warning and inserts still work."""
+    import json
+    import logging
+    import time
+    import uuid
+
+    import db
+    import review_manager
+
+    review = review_manager.create_review("Legacy test", "")
+    search_id = review_manager.log_search(review["id"], "openalex", "q", {}, 1, 0)
+
+    conn = db.get_db()
+    conn.execute("DROP INDEX idx_rp_review_doi_unique")
+    for title in ("Legacy dup 1", "Legacy dup 2"):
+        conn.execute(
+            """INSERT INTO review_papers
+               (id, review_id, doi, pmid, title, authors, year, source, search_id, added_at, status, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+            (
+                str(uuid.uuid4()),
+                review["id"],
+                "10.1000/legacy-dup",
+                "",
+                title,
+                json.dumps([]),
+                2019,
+                "openalex",
+                search_id,
+                time.time(),
+                json.dumps({}),
+            ),
+        )
+    conn.commit()
+
+    review_manager._tables_initialized = False
+    with caplog.at_level(logging.WARNING):
+        review_manager._ensure_tables()
+    assert "duplicate DOIs" in caplog.text
+
+    # Dedup still works via the Python check alone.
+    assert (
+        review_manager.add_papers(
+            review["id"],
+            search_id,
+            [{"doi": "10.1000/legacy-dup", "title": "Legacy dup 3"}],
+            "openalex",
+        )
+        == 0
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sticky active review — startup warning support
+# ---------------------------------------------------------------------------
+
+
+def test_get_active_review_info():
+    import review_manager
+
+    assert review_manager.get_active_review_info() is None
+
+    review = review_manager.create_review("Sticky review", "")
+    review_manager.set_active_review(review["id"])
+
+    info = review_manager.get_active_review_info()
+    assert info is not None
+    assert info["id"] == review["id"]
+    assert info["name"] == "Sticky review"
+    assert info["age_days"] >= 0
+
+    review_manager.set_active_review(None)
+    assert review_manager.get_active_review_info() is None

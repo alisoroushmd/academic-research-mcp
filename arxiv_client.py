@@ -86,7 +86,7 @@ def search_arxiv(
 
     _throttle()
     resp = http_client.get(ARXIV_API_BASE, params=params, timeout=30)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
 
     return _parse_feed(resp.text)
 
@@ -113,7 +113,7 @@ def get_arxiv_paper(arxiv_id: str) -> Dict[str, Any]:
 
     _throttle()
     resp = http_client.get(ARXIV_API_BASE, params=params, timeout=30)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
 
     papers = _parse_feed(resp.text)
     if papers:
@@ -150,7 +150,7 @@ def get_arxiv_by_author(
 
     _throttle()
     resp = http_client.get(ARXIV_API_BASE, params=params, timeout=30)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
 
     return _parse_feed(resp.text)
 

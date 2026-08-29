@@ -7,6 +7,7 @@ for contexts that require blocking calls (e.g., cache decorator internals).
 """
 
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import requests
@@ -23,9 +24,36 @@ DEFAULT_TIMEOUT = 15  # seconds
 BATCH_TIMEOUT = 30  # for batch/bulk endpoints
 
 _USER_AGENT = (
-    "academic-research-mcp/0.1.0 "
+    "academic-research-mcp/0.2.0 "
     "(+https://github.com/alisoroushmd/academic-research-mcp)"
 )
+
+
+def sanitize_url(url) -> str:
+    """Strip the query string and fragment from a URL for safe error text.
+
+    API keys (NCBI_API_KEY) and polite-pool emails ride in URL query
+    parameters; error messages built from the full URL would leak them into
+    client-visible tool responses and logs.
+    """
+    parts = urlsplit(str(url))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def raise_for_status_sanitized(resp) -> None:
+    """
+    Like Response.raise_for_status(), but the exception message contains only
+    the status code and the endpoint path — never the query string, which may
+    carry an API key or email. Use this instead of resp.raise_for_status()
+    everywhere the request URL carries query parameters.
+    """
+    status = getattr(resp, "status_code", None)
+    if status is not None and 400 <= status < 600:
+        safe_url = sanitize_url(getattr(resp, "url", ""))
+        raise requests.HTTPError(
+            f"HTTP {status} error for {safe_url} (query string redacted)",
+            response=resp,
+        )
 
 
 def get_session() -> requests.Session:
@@ -67,14 +95,35 @@ def get(url: str, timeout: int = DEFAULT_TIMEOUT, **kwargs) -> requests.Response
     """Make a GET request with connection pooling and retry logic."""
     _require_https(url)
     session = get_session()
-    return session.get(url, timeout=timeout, **kwargs)
+    try:
+        return session.get(url, timeout=timeout, **kwargs)
+    except requests.RequestException as exc:
+        _raise_transport_error_sanitized(exc, url)
 
 
 def post(url: str, timeout: int = BATCH_TIMEOUT, **kwargs) -> requests.Response:
     """Make a POST request with connection pooling and retry logic."""
     _require_https(url)
     session = get_session()
-    return session.post(url, timeout=timeout, **kwargs)
+    try:
+        return session.post(url, timeout=timeout, **kwargs)
+    except requests.RequestException as exc:
+        _raise_transport_error_sanitized(exc, url)
+
+
+def _raise_transport_error_sanitized(
+    exc: requests.RequestException, fallback_url: str
+) -> None:
+    """Re-raise a transport failure without query credentials in its text."""
+    request = getattr(exc, "request", None)
+    request_url = getattr(request, "url", None) or fallback_url
+    safe_url = sanitize_url(request_url)
+    # Preserve the requests exception subtype so callers can still distinguish
+    # timeouts from connection failures. Do not attach the original request:
+    # its prepared URL may itself contain the secret query string.
+    raise type(exc)(
+        f"{type(exc).__name__} for {safe_url} (query string redacted)"
+    ) from None
 
 
 # --------------------------------------------------------------------------

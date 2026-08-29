@@ -2,7 +2,7 @@
   "mcpb_version": "0.1",
   "name": "academic-research-mcp",
   "display_name": "Academic Research",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Search 9 academic databases — PubMed, arXiv, OpenAlex, Semantic Scholar, medRxiv/bioRxiv, CrossRef, Google Scholar, ORCID, Unpaywall — with 25 tools and systematic review support.",
   "long_description": "Unified MCP server for biomedical and CS literature search. Provides 25 tools across 9 APIs with local caching, PRISMA-compliant systematic review workflows, citation graph harvesting, and legal open-access PDF resolution. No API keys required for basic use.",
   "author": {

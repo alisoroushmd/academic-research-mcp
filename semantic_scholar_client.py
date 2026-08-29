@@ -69,7 +69,7 @@ def search_papers(
         return cached
 
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     papers = [_format_paper(item) for item in data.get("data", [])]
@@ -100,7 +100,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
         return cached
 
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     paper = _format_paper(data)
@@ -146,7 +146,7 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return [_format_paper(item.get("citingPaper", {})) for item in data.get("data", [])]
@@ -170,7 +170,7 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return [_format_paper(item.get("citedPaper", {})) for item in data.get("data", [])]
@@ -192,7 +192,7 @@ def get_author_details(author_id: str) -> Dict[str, Any]:
         "fields": "name,affiliations,homepage,paperCount,citationCount,hIndex",
     }
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     author = {
@@ -227,7 +227,7 @@ def search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
         "fields": "name,affiliations,paperCount,citationCount,hIndex",
     }
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     authors = []
@@ -263,7 +263,7 @@ def get_author_papers(author_id: str, num_results: int = 20) -> List[Dict[str, A
         "fields": "title,year,citationCount,venue,externalIds,influentialCitationCount",
     }
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return [_format_paper(item) for item in data.get("data", [])]
@@ -288,7 +288,7 @@ def get_recommended_papers(
         "fields": "title,authors,year,citationCount,venue,externalIds,abstract",
     }
     resp = http_client.get(url, headers=_headers(), params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     return [_format_paper(item) for item in data.get("recommendedPapers", [])]
@@ -357,7 +357,7 @@ def batch_get_papers(
             params=params,
             json={"ids": chunk},
         )
-        resp.raise_for_status()
+        http_client.raise_for_status_sanitized(resp)
         batch = resp.json()
 
         for item in batch:

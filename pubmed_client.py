@@ -8,7 +8,6 @@ Rate limits: 3 requests/sec without API key, 10/sec with NCBI_API_KEY.
 """
 
 import logging
-import time
 from typing import Any, Dict, List, Optional
 
 import defusedxml.ElementTree as ET
@@ -19,7 +18,8 @@ import cache
 logger = logging.getLogger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-EFETCH_BATCH_SIZE = 200
+# One EFetch batch per call; page with offset (retstart) for larger result sets.
+MAX_RESULTS_PER_PAGE = 200
 
 
 def _api_params() -> Dict[str, str]:
@@ -31,13 +31,8 @@ def _api_params() -> Dict[str, str]:
     return params
 
 
-def _rate_delay() -> float:
-    """Delay between requests based on whether API key is set."""
-    return 0.1 if http_client.get_env("NCBI_API_KEY") else 0.34
-
-
 def esearch(
-    query: str, max_results: int = 100, use_history: bool = True
+    query: str, max_results: int = 100, use_history: bool = True, retstart: int = 0
 ) -> Dict[str, Any]:
     """Search PubMed and return PMIDs. Supports full PubMed syntax."""
     params = _api_params()
@@ -48,11 +43,13 @@ def esearch(
             "retmode": "json",
         }
     )
+    if retstart:
+        params["retstart"] = retstart
     if use_history:
         params["usehistory"] = "y"
 
     resp = http_client.get(f"{EUTILS_BASE}/esearch.fcgi", params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
     result_data = data.get("esearchresult", {})
 
@@ -86,7 +83,7 @@ def efetch(
         return []
 
     resp = http_client.get(f"{EUTILS_BASE}/efetch.fcgi", params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     return _parse_pubmed_xml(resp.content)
 
 
@@ -218,39 +215,52 @@ def _parse_article(article_elem) -> Optional[Dict[str, Any]]:
 
 
 @cache.cached(category="search", ttl=cache.SEARCH_TTL)
-def search_pubmed(query: str, max_results: int = 100) -> Dict[str, Any]:
-    """Search PubMed and return full article metadata."""
-    max_results = max(1, min(max_results, 10000))
-    search_result = esearch(query, max_results=max_results, use_history=True)
+def search_pubmed(
+    query: str, max_results: int = 100, offset: int = 0
+) -> Dict[str, Any]:
+    """Search PubMed and return full article metadata, one page at a time.
+
+    Results are capped at MAX_RESULTS_PER_PAGE (200) per call. Use `offset`
+    (ESearch/EFetch retstart) to page through larger result sets; the response
+    reports `total_count` and `has_more` so callers know when to stop.
+    """
+    max_results = max(1, min(max_results, MAX_RESULTS_PER_PAGE))
+    offset = max(0, offset)
+    search_result = esearch(
+        query, max_results=max_results, use_history=True, retstart=offset
+    )
     pmids = search_result["pmids"]
+    total_count = search_result["total_count"]
 
     if not pmids:
         return {
-            "total_count": search_result["total_count"],
+            "total_count": total_count,
             "query_translation": search_result["query_translation"],
             "papers": [],
+            "offset": offset,
+            "returned": 0,
+            "has_more": offset < total_count,
         }
 
-    all_papers = []
     webenv = search_result.get("webenv", "")
     query_key = search_result.get("query_key", "")
 
-    if webenv and query_key and len(pmids) > EFETCH_BATCH_SIZE:
-        for start in range(0, len(pmids), EFETCH_BATCH_SIZE):
-            batch = efetch(
-                webenv=webenv,
-                query_key=query_key,
-                retstart=start,
-                retmax=EFETCH_BATCH_SIZE,
-            )
-            all_papers.extend(batch)
-            if start + EFETCH_BATCH_SIZE < len(pmids):
-                time.sleep(_rate_delay())
+    if webenv and query_key:
+        # EFetch retstart indexes into the full WebEnv result set.
+        papers = efetch(
+            webenv=webenv,
+            query_key=query_key,
+            retstart=offset,
+            retmax=max_results,
+        )
     else:
-        all_papers = efetch(pmids=pmids)
+        papers = efetch(pmids=pmids, retmax=max_results)
 
     return {
-        "total_count": search_result["total_count"],
+        "total_count": total_count,
         "query_translation": search_result["query_translation"],
-        "papers": all_papers,
+        "papers": papers,
+        "offset": offset,
+        "returned": len(papers),
+        "has_more": offset + len(papers) < total_count,
     }

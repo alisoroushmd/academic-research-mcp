@@ -47,7 +47,7 @@ def search_medrxiv(
     # Search published articles that match the query
     url = f"{base}/pubs/{quote(server, safe='')}/{quote(query, safe='')}/na/json"
     resp = http_client.get(url)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     results = []
@@ -79,7 +79,7 @@ def search_medrxiv_by_date(
     url = f"{base}/details/{server}/{start_date}/{end_date}/0/json"
 
     resp = http_client.get(url)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     results = []
@@ -105,7 +105,7 @@ def get_medrxiv_preprint(doi: str) -> Dict[str, Any]:
 
     url = f"{MEDRXIV_API}/details/{quote(doi, safe='/')}/json"
     resp = http_client.get(url)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     collection = data.get("collection", [])
@@ -147,7 +147,7 @@ def get_publication_status(doi: str) -> Dict[str, Any]:
 
     url = f"{MEDRXIV_API}/publisher/doi/{quote(doi, safe='/')}/json"
     resp = http_client.get(url)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     collection = data.get("collection", [])
@@ -199,7 +199,7 @@ def get_recent_by_category(
 
     url = f"{base}/details/{server}/{start_date}/{end_date}/0/json"
     resp = http_client.get(url)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     results = []

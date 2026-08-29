@@ -32,7 +32,7 @@ def search_orcid(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
     url = f"{ORCID_API_BASE}/search/"
     params = {"q": query, "rows": num_results}
     resp = http_client.get(url, headers=HEADERS, params=params)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     orcid_ids = [
@@ -63,7 +63,7 @@ def get_orcid_profile(orcid_id: str) -> Dict[str, Any]:
     """
     url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/person"
     resp = http_client.get(url, headers=HEADERS)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     person = resp.json()
 
     name_data = person.get("name", {}) or {}
@@ -103,7 +103,7 @@ def get_orcid_works(orcid_id: str, max_works: int = 20) -> List[Dict[str, Any]]:
     """
     url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/works"
     resp = http_client.get(url, headers=HEADERS)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     works = []
@@ -161,7 +161,7 @@ def get_orcid_employments(orcid_id: str) -> List[Dict[str, Any]]:
     """
     url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/employments"
     resp = http_client.get(url, headers=HEADERS)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     employments = []
@@ -195,7 +195,7 @@ def get_orcid_education(orcid_id: str) -> List[Dict[str, Any]]:
     """
     url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/educations"
     resp = http_client.get(url, headers=HEADERS)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     educations = []
@@ -229,7 +229,7 @@ def get_orcid_funding(orcid_id: str) -> List[Dict[str, Any]]:
     """
     url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/fundings"
     resp = http_client.get(url, headers=HEADERS)
-    resp.raise_for_status()
+    http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
     fundings = []
@@ -267,7 +267,7 @@ def _get_minimal_profile(orcid_id: str) -> Dict[str, Any]:
     url = f"{ORCID_API_BASE}/{quote(orcid_id, safe='')}/person"
     try:
         resp = http_client.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
+        http_client.raise_for_status_sanitized(resp)
         person = resp.json()
 
         name_data = person.get("name", {}) or {}
