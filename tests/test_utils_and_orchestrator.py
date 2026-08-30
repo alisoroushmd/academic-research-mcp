@@ -5,6 +5,8 @@ orchestrator._classify_identifier.
 
 import sys
 import os
+import threading
+import time
 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -177,3 +179,64 @@ class TestClassifyIdentifier:
         # 10 digits — above PMID range
         t, _ = _classify_identifier("1234567890")
         assert t == "title"
+
+
+def test_title_resolution_queries_three_providers_concurrently(monkeypatch):
+    import orchestrator
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fetch(source):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return [{"title": "Target title", "doi": f"10.1000/{source}"}]
+
+    monkeypatch.setattr(
+        orchestrator.oalex, "search_works", lambda *a, **k: fetch("openalex")
+    )
+    monkeypatch.setattr(orchestrator.s2, "search_papers", lambda *a, **k: fetch("s2"))
+    monkeypatch.setattr(
+        orchestrator.cr, "search_works", lambda *a, **k: fetch("crossref")
+    )
+
+    paper, source = orchestrator._resolve_title("Target title")
+
+    assert max_active == 3
+    assert paper is not None
+    assert source in {"openalex", "s2", "crossref"}
+
+
+def test_title_resolution_precomputes_doi_source_map(monkeypatch):
+    import orchestrator
+
+    shared = {"title": "Target title", "doi": "10.1000/shared"}
+    monkeypatch.setattr(
+        orchestrator.oalex, "search_works", lambda *a, **k: [shared, {"title": "A"}]
+    )
+    monkeypatch.setattr(
+        orchestrator.s2, "search_papers", lambda *a, **k: [shared, {"title": "B"}]
+    )
+    monkeypatch.setattr(
+        orchestrator.cr, "search_works", lambda *a, **k: [shared, {"title": "C"}]
+    )
+    real_extract = orchestrator._extract_doi
+    calls = 0
+
+    def counting_extract(paper):
+        nonlocal calls
+        calls += 1
+        return real_extract(paper)
+
+    monkeypatch.setattr(orchestrator, "_extract_doi", counting_extract)
+
+    paper, _ = orchestrator._resolve_title("Target title")
+
+    assert paper is not None
+    assert calls == 6

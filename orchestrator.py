@@ -9,9 +9,11 @@ find_paper resolves any identifier (DOI, PMID, title, arXiv ID, URL)
 through the cheapest path without the caller needing to know which tool to use.
 """
 
+import asyncio
 import re
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import cache
@@ -25,6 +27,69 @@ import pubmed_client
 from utils import title_similarity, has_medical_terms
 
 logger = logging.getLogger(__name__)
+
+
+class _S2HarvestLimiter:
+    """Process-shared S2 harvest concurrency and request-start pacing."""
+
+    def __init__(self, max_concurrency: int, min_interval: float):
+        self.max_concurrency = max_concurrency
+        self.min_interval = min_interval
+        self._loop = None
+        self._semaphore = None
+        self._pacing_lock = None
+        self._last_started = None
+
+    def _ensure_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is loop:
+            return
+        self._loop = loop
+        self._semaphore = asyncio.Semaphore(self.max_concurrency)
+        self._pacing_lock = asyncio.Lock()
+        self._last_started = None
+
+    async def run(self, awaitable_factory):
+        self._ensure_loop()
+        async with self._semaphore:
+            async with self._pacing_lock:
+                now = self._loop.time()
+                if self._last_started is not None:
+                    wait = self.min_interval - (now - self._last_started)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                self._last_started = self._loop.time()
+            return await awaitable_factory()
+
+
+_s2_harvest_limiters = {}
+_s2_edge_flights = {}
+
+
+def _get_s2_harvest_limiter(has_api_key: bool) -> _S2HarvestLimiter:
+    """Return the shared limiter for the active S2 quota class."""
+    if has_api_key:
+        raw_interval = http_client.get_env("S2_API_KEY_MIN_INTERVAL_SECONDS", "1.0")
+        try:
+            min_interval = float(raw_interval)
+            if min_interval < 0:
+                raise ValueError
+        except ValueError:
+            logger.warning(
+                "Invalid S2_API_KEY_MIN_INTERVAL_SECONDS=%r; using 1.0", raw_interval
+            )
+            min_interval = 1.0
+        max_concurrency = 10
+    else:
+        min_interval = 1.0
+        max_concurrency = 1
+
+    key = (max_concurrency, min_interval)
+    limiter = _s2_harvest_limiters.get(key)
+    if limiter is None:
+        limiter = _S2HarvestLimiter(max_concurrency, min_interval)
+        _s2_harvest_limiters[key] = limiter
+    return limiter
 
 
 def smart_search(
@@ -285,8 +350,9 @@ def _resolve_title(title_query: str) -> Tuple[Optional[Dict], Optional[str]]:
     all_candidates: List[Tuple[Dict, str]] = []  # (paper, source_name)
     is_medical = _has_medical_terms(title_query)
 
-    # Collect candidates from multiple sources in parallel-ish fashion
-    for source_name, fetch_fn in [
+    # These providers are independent. Submit all three at once, while keeping
+    # the provider order stable so equal-scoring candidates resolve as before.
+    providers = [
         ("openalex", lambda: oalex.search_works(title_query, num_results=5)),
         (
             "s2",
@@ -297,33 +363,39 @@ def _resolve_title(title_query: str) -> Tuple[Optional[Dict], Optional[str]]:
             ),
         ),
         ("crossref", lambda: cr.search_works(title_query, num_results=5)),
-    ]:
-        try:
-            results = fetch_fn()
-            for r in results:
-                all_candidates.append((r, source_name))
-        except Exception as e:
-            logger.debug(f"Title search via {source_name} failed: {e}")
+    ]
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [(name, executor.submit(fetch_fn)) for name, fetch_fn in providers]
+        for source_name, future in futures:
+            try:
+                for result in future.result():
+                    all_candidates.append((result, source_name))
+            except Exception as e:
+                logger.debug(f"Title search via {source_name} failed: {e}")
 
     if not all_candidates:
         return None, None
 
+    # Precompute cross-source DOI appearances once. The previous nested scan
+    # re-extracted every DOI for every candidate (quadratic in result count).
+    candidate_dois: List[str] = []
+    doi_sources: Dict[str, set] = {}
+    for paper, source_name in all_candidates:
+        doi = _extract_doi(paper).lower()
+        candidate_dois.append(doi)
+        if doi:
+            doi_sources.setdefault(doi, set()).add(source_name)
+
     # Score all candidates
     scored = []
-    for paper, src in all_candidates:
+    for (paper, src), doi_lower in zip(all_candidates, candidate_dois):
         title = paper.get("title", "") or ""
         base_score = _title_similarity(title_query, title)
 
         # Cross-source DOI confirmation: papers found by multiple sources
         # are more likely to be correct
-        doi = _extract_doi(paper)
-        if doi:
-            doi_lower = doi.lower()
-            appearances = sum(
-                1
-                for p, s in all_candidates
-                if s != src and _extract_doi(p).lower() == doi_lower
-            )
+        if doi_lower:
+            appearances = len(doi_sources[doi_lower] - {src})
             if appearances > 0:
                 base_score += 0.15 * appearances  # boost for cross-source confirmation
 
@@ -534,33 +606,66 @@ async def async_harvest_citations(
     direction: str = "both",
 ) -> Dict[str, Any]:
     """
-    Async version of harvest_citations — processes seeds in parallel using
-    asyncio.to_thread for each S2 API call. With S2_API_KEY (100 req/sec),
-    50 seeds × 2 directions completes in ~2s instead of ~100s sequential.
-    """
-    import asyncio
+    Async version of harvest_citations with provider-aware concurrency.
 
+    A keyed harvest uses at most 10 in-flight requests, but starts requests at
+    one-second intervals by default because that is Semantic Scholar's standard
+    keyed quota across endpoints. Keys granted a different quota can configure
+    their minimum interval. Anonymous requests are serialized and paced by one
+    second. S2 has a native async client; blocking clients should only be
+    adapted with ``asyncio.to_thread`` at their call boundary if another
+    citation provider is added later.
+    """
     if len(seed_paper_ids) > 50:
         return {"error": "Maximum 50 seed papers per snowball search."}
 
-    async def _fetch_seed(seed_id: str) -> List[Dict]:
-        papers = []
-        if direction in ("forward", "both"):
-            try:
-                cites = await asyncio.to_thread(s2.get_paper_citations, seed_id, 100)
-                papers.extend(cites)
-            except Exception as e:
-                logger.warning(f"Snowball citations failed for {seed_id}: {e}")
-        if direction in ("backward", "both"):
-            try:
-                refs = await asyncio.to_thread(s2.get_paper_references, seed_id, 100)
-                papers.extend(refs)
-            except Exception as e:
-                logger.warning(f"Snowball references failed for {seed_id}: {e}")
-        return papers
+    has_api_key = bool(http_client.get_env("S2_API_KEY"))
+    limiter = _get_s2_harvest_limiter(has_api_key)
 
-    # Process all seeds concurrently
-    results = await asyncio.gather(*[_fetch_seed(sid) for sid in seed_paper_ids])
+    async def _fetch_one(seed_id: str, relation: str) -> List[Dict]:
+        cached = s2.get_cached_related_papers(relation, seed_id, 100)
+        if cached is not None:
+            return cached
+
+        fetch_fn = (
+            s2.async_get_paper_citations
+            if relation == "citations"
+            else s2.async_get_paper_references
+        )
+
+        async def _request():
+            try:
+                return await fetch_fn(seed_id, 100)
+            except Exception as e:
+                logger.warning(f"Snowball {relation} failed for {seed_id}: {e}")
+                return []
+
+        loop = asyncio.get_running_loop()
+        edge_key = s2._related_cache_key(relation, seed_id, 100)
+        flight_key = (loop, edge_key)
+        flight = _s2_edge_flights.get(flight_key)
+        if flight is None:
+            flight = loop.create_task(limiter.run(_request))
+            _s2_edge_flights[flight_key] = flight
+
+            def _clear_flight(done):
+                if _s2_edge_flights.get(flight_key) is done:
+                    _s2_edge_flights.pop(flight_key, None)
+
+            flight.add_done_callback(_clear_flight)
+
+        # A canceled caller must not cancel the provider request that other
+        # followers are sharing.
+        return await asyncio.shield(flight)
+
+    requests = []
+    for seed_id in seed_paper_ids:
+        if direction in ("forward", "both"):
+            requests.append(_fetch_one(seed_id, "citations"))
+        if direction in ("backward", "both"):
+            requests.append(_fetch_one(seed_id, "references"))
+
+    results = await asyncio.gather(*requests)
 
     all_candidates = []
     for papers in results:

@@ -21,6 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Snowball harvesting now shares Semantic Scholar admission controls across concurrent calls.** Citation and reference requests use native async I/O, canonical sync/async cache keys, single-flight cache misses, and process-shared quota pacing; cached edges bypass provider admission. Exact-title resolution queries three independent providers concurrently and scores cross-source DOI evidence in linear time. (`orchestrator.py`, `semantic_scholar_client.py`, `server.py`, `tests/test_server_tools.py`, `tests/test_snowball.py`, `tests/test_utils_and_orchestrator.py`)
+
+- **Review-paper deduplication now scales by batch.** An additive SQLite migration backfills and indexes normalized titles, adds partial PMID uniqueness without deleting legacy rows, preloads identifier/title state once per batch, and performs one bulk `INSERT OR IGNORE` transaction. Fuzzy title comparison is limited to records where both sides lack DOI/PMID identifiers. (`review_manager.py`, `utils.py`, `tests/test_review_manager.py`, `README.md`)
+
 - **PubMed searches are paginated and capped at 200 results per call.** `search_papers(source="pubmed")` previously accepted `num_results` up to 10,000 and EFetch'ed the entire result set — in 200-record batches — into a single tool response. It now caps at 200 like every other source; PubMed responses return `{papers, total_count, offset, returned, has_more}` and larger result sets are paged with the new `offset` argument (E-utilities `retstart`). (`pubmed_client.py`, `server.py`, `tests/test_pubmed_client.py`, `tests/test_server_tools.py`)
 
 - **`pyproject.toml` is the single source of dependencies.** `requirements.txt` is removed — it still pinned `mcp>=1.0`, contradicting `pyproject.toml`, and CI installed from it. CI now installs the project itself (`pip install -e .`), `uv.lock` records the release environment, and `pip-audit` audits the resolved environment. (`requirements.txt`, `uv.lock`, `.github/workflows/ci.yml`)
@@ -32,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **DXT manifest email fields are no longer marked `sensitive`.** `openalex_email` and `crossref_email` now display as plain text in the Claude Desktop UI. An email is contact information for the OpenAlex/CrossRef polite pool, not a secret, and masking it made it harder for users to verify the identity they registered. (API keys remain `sensitive`.) (`dxt/manifest.json`, `dxt/academic-research-mcp.dxt`)
 
 ### Fixed
+
+- **Packaging metadata now builds without setuptools deprecation or redundant manifest warnings.** The project uses an SPDX license expression with a compatible setuptools build floor, removes the deprecated license classifier, and drops a redundant `.DS_Store` exclusion. (`pyproject.toml`, `MANIFEST.in`)
 
 - **`open_access` failure modes are now self-diagnosing.** Previously a missing/placeholder `OPENALEX_EMAIL`, an empty/invalid DOI, and a DOI genuinely absent from Unpaywall all collapsed into an indistinguishable `is_oa=False` / empty `pdf_url` (especially in batch mode, where `batch_check_oa` silently discarded the underlying `error`). This made a config problem look like a global "nothing is open access" outage. Each result now carries an `error_type` (`config` / `invalid_doi` / `not_in_unpaywall` / `api_error`), config problems also set `config_issue: True`, and placeholder emails (`example.com`, `your-email`, `changeme`, …) plus malformed addresses and Unpaywall `422` responses are detected and reported with an actionable message. (`unpaywall_client.py`, `tests/test_unpaywall_client.py`)
 

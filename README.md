@@ -130,7 +130,7 @@ academic-research-mcp
 9. export_review(review_id)           # DOI list for Zotero import
 ```
 
-All searches are logged with source, query, filters, raw count, and new-after-dedup count. Deduplication uses DOI (case-insensitive), PMID, and fuzzy title matching (>=85% similarity).
+All searches are logged with source, query, filters, raw count, and new-after-dedup count. Deduplication uses DOI (case-insensitive), PMID, exact normalized titles, and >=85% fuzzy title matching only when both the incoming and stored records lack DOI/PMID identifiers.
 
 ## Abstracts
 
@@ -161,6 +161,8 @@ When you need to process papers faster than individual APIs allow:
 4. **PubMed** -- 10 req/sec with NCBI API key, full MeSH vocabulary
 5. **Cache hit** -- Repeated lookups (landmark papers, your own work) are instant
 6. **Google Scholar last** -- Most aggressive rate limiting, use sparingly
+
+Snowball harvesting uses a process-shared Semantic Scholar limiter across concurrent harvest calls and both citation endpoints. With `S2_API_KEY` configured, at most 10 requests may be in flight, while request starts default to one-second spacing to match Semantic Scholar's standard keyed quota across endpoints; if Semantic Scholar grants that key a different quota, set `S2_API_KEY_MIN_INTERVAL_SECONDS` to the corresponding minimum interval. Without a key, requests are globally serialized with one-second spacing. See the [official API tutorial](https://www.semanticscholar.org/product/api/tutorial) for current quota guidance.
 
 ## Local Cache
 

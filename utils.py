@@ -59,6 +59,11 @@ def title_similarity(query: str, title: str) -> float:
     return 0.65 * word_score + 0.35 * seq_sim
 
 
+def normalize_title(title: str) -> str:
+    """Return the stable form used for exact title deduplication."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).split())
+
+
 def has_medical_terms(query: str) -> bool:
     """Check if a query contains medical/biomedical terms."""
     words = set(re.sub(r"[^a-z0-9 ]", " ", query.lower()).split())

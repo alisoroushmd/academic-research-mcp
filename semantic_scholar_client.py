@@ -128,7 +128,6 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     return paper
 
 
-@cache.cached(category="citations", ttl=cache.SEARCH_TTL)
 def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers that cite a given paper.
@@ -140,6 +139,11 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
     Returns:
         List of citing paper dicts.
     """
+    key = _related_cache_key("citations", paper_id, num_results)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
     url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/citations"
     params = {
         "limit": min(num_results, 100),
@@ -149,10 +153,13 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
     http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
-    return [_format_paper(item.get("citingPaper", {})) for item in data.get("data", [])]
+    papers = [
+        _format_paper(item.get("citingPaper", {})) for item in data.get("data", [])
+    ]
+    cache.put(key, papers, category="citations", ttl=cache.SEARCH_TTL)
+    return papers
 
 
-@cache.cached(category="references", ttl=cache.SEARCH_TTL)
 def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str, Any]]:
     """
     Get papers referenced by a given paper.
@@ -164,6 +171,11 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
     Returns:
         List of referenced paper dicts.
     """
+    key = _related_cache_key("references", paper_id, num_results)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
     url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/references"
     params = {
         "limit": min(num_results, 100),
@@ -173,7 +185,65 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
     http_client.raise_for_status_sanitized(resp)
     data = resp.json()
 
-    return [_format_paper(item.get("citedPaper", {})) for item in data.get("data", [])]
+    papers = [
+        _format_paper(item.get("citedPaper", {})) for item in data.get("data", [])
+    ]
+    cache.put(key, papers, category="references", ttl=cache.SEARCH_TTL)
+    return papers
+
+
+def _related_cache_key(relation: str, paper_id: str, num_results: int) -> str:
+    """Canonical cache key shared by sync and async citation-edge clients."""
+    function_name = (
+        "get_paper_citations" if relation == "citations" else "get_paper_references"
+    )
+    return cache.make_key(function_name, paper_id, num_results)
+
+
+def get_cached_related_papers(
+    relation: str, paper_id: str, num_results: int
+) -> Optional[List[Dict[str, Any]]]:
+    """Return a cached citation edge without entering provider rate limits."""
+    return cache.get(_related_cache_key(relation, paper_id, num_results))
+
+
+async def _async_get_related_papers(
+    paper_id: str,
+    num_results: int,
+    relation: str,
+) -> List[Dict[str, Any]]:
+    """Fetch a citation edge with native async I/O and the sync cache keys."""
+    key = _related_cache_key(relation, paper_id, num_results)
+    cached = get_cached_related_papers(relation, paper_id, num_results)
+    if cached is not None:
+        return cached
+
+    url = f"{S2_API_BASE}/paper/{quote(paper_id, safe='')}/{relation}"
+    params = {
+        "limit": min(num_results, 100),
+        "fields": "title,authors,year,citationCount,venue,externalIds",
+    }
+    resp = await http_client.async_get(url, headers=_headers(), params=params)
+    http_client.raise_for_status_sanitized(resp)
+    data = resp.json()
+    edge_key = "citingPaper" if relation == "citations" else "citedPaper"
+    papers = [_format_paper(item.get(edge_key, {})) for item in data.get("data", [])]
+    cache.put(key, papers, category=relation, ttl=cache.SEARCH_TTL)
+    return papers
+
+
+async def async_get_paper_citations(
+    paper_id: str, num_results: int = 20
+) -> List[Dict[str, Any]]:
+    """Native-async counterpart to :func:`get_paper_citations`."""
+    return await _async_get_related_papers(paper_id, num_results, "citations")
+
+
+async def async_get_paper_references(
+    paper_id: str, num_results: int = 20
+) -> List[Dict[str, Any]]:
+    """Native-async counterpart to :func:`get_paper_references`."""
+    return await _async_get_related_papers(paper_id, num_results, "references")
 
 
 def get_author_details(author_id: str) -> Dict[str, Any]:

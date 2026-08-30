@@ -367,19 +367,66 @@ def test_unique_doi_index_blocks_raw_duplicate_inserts():
 
 
 def test_add_papers_survives_duplicate_race(monkeypatch):
-    """If the Python duplicate check misses (concurrent insert), OR IGNORE
-    drops the row silently and the paper is not double-counted."""
+    """A competing insert between preload and executemany is not counted."""
+    import json
+    import sqlite3
+    import time
+    import uuid
+
+    import db
     import review_manager
 
     review = review_manager.create_review("Race test", "")
     search_id = review_manager.log_search(review["id"], "openalex", "q", {}, 1, 0)
-    assert (
-        review_manager.add_papers(review["id"], search_id, [SAMPLE_PAPER], "openalex")
-        == 1
-    )
+    real_conn = db.get_db()
 
-    # Simulate the race: duplicate check sees nothing, index catches it.
-    monkeypatch.setattr(review_manager, "_is_duplicate", lambda *a, **k: False)
+    class RacingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.raced = False
+
+        @property
+        def total_changes(self):
+            return self.connection.total_changes
+
+        def execute(self, sql, parameters=()):
+            return self.connection.execute(sql, parameters)
+
+        def executemany(self, sql, parameters):
+            if not self.raced:
+                self.raced = True
+                rival = sqlite3.connect(db.get_db_path())
+                rival.execute(
+                    """INSERT INTO review_papers
+                       (id, review_id, doi, pmid, title, normalized_title,
+                        authors, year, source, search_id, added_at, status, metadata)
+                       VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+                    (
+                        str(uuid.uuid4()),
+                        review["id"],
+                        SAMPLE_PAPER["doi"],
+                        "Racing insert",
+                        "racing insert",
+                        json.dumps([]),
+                        2024,
+                        "rival",
+                        search_id,
+                        time.time(),
+                        json.dumps({}),
+                    ),
+                )
+                rival.commit()
+                rival.close()
+            return self.connection.executemany(sql, parameters)
+
+        def commit(self):
+            return self.connection.commit()
+
+        def rollback(self):
+            return self.connection.rollback()
+
+    racing_conn = RacingConnection(real_conn)
+    monkeypatch.setattr(review_manager._db, "get_db", lambda: racing_conn)
     assert (
         review_manager.add_papers(review["id"], search_id, [SAMPLE_PAPER], "openalex")
         == 0
@@ -387,6 +434,207 @@ def test_add_papers_survives_duplicate_race(monkeypatch):
 
     papers = review_manager.get_review_papers(review["id"])
     assert len(papers) == 1
+    assert papers[0]["source"] == "rival"
+
+
+def test_add_papers_uses_one_bulk_insert_and_one_transaction(monkeypatch):
+    """A batch preloads unresolved titles and writes with one executemany."""
+    import db
+    import review_manager
+
+    review = review_manager.create_review("Bulk test", "")
+    search_id = review_manager.log_search(review["id"], "openalex", "q", {}, 2, 0)
+    real_conn = db.get_db()
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self.connection = connection
+            self.execute_sql = []
+            self.executemany_calls = 0
+            self.commit_calls = 0
+
+        @property
+        def total_changes(self):
+            return self.connection.total_changes
+
+        def execute(self, sql, parameters=()):
+            self.execute_sql.append(" ".join(sql.split()))
+            return self.connection.execute(sql, parameters)
+
+        def executemany(self, sql, parameters):
+            self.executemany_calls += 1
+            return self.connection.executemany(sql, parameters)
+
+        def commit(self):
+            self.commit_calls += 1
+            return self.connection.commit()
+
+        def rollback(self):
+            return self.connection.rollback()
+
+    proxy = ConnectionProxy(real_conn)
+    monkeypatch.setattr(review_manager._db, "get_db", lambda: proxy)
+
+    papers = [
+        {"doi": "10.1000/bulk-1", "title": "Bulk paper one"},
+        {"pmid": "12345678", "title": "Bulk paper two"},
+    ]
+    assert review_manager.add_papers(review["id"], search_id, papers, "test") == 2
+
+    unresolved_selects = [
+        sql
+        for sql in proxy.execute_sql
+        if sql.startswith("SELECT normalized_title, title FROM review_papers")
+    ]
+    assert len(unresolved_selects) == 1
+    assert proxy.executemany_calls == 1
+    assert proxy.commit_calls == 1
+
+
+def test_fuzzy_matching_only_compares_unresolved_records():
+    import review_manager
+
+    review = review_manager.create_review("Scoped fuzzy test", "")
+    search_id = review_manager.log_search(review["id"], "test", "q", {}, 3, 0)
+
+    identified = {
+        "doi": "10.1000/identified",
+        "title": "A distinctive clinical evidence synthesis",
+    }
+    unresolved_same_title = {
+        "title": "A distinctive clinical evidence synthesis",
+    }
+    identified_similar_to_unresolved = {
+        "doi": "10.1000/second",
+        "title": "A distinctive clinical evidence synthesis updated",
+    }
+
+    assert review_manager.add_papers(review["id"], search_id, [identified], "test") == 1
+    # Identifier-bearing records are outside the unresolved fuzzy pool.
+    assert (
+        review_manager.add_papers(
+            review["id"], search_id, [unresolved_same_title], "test"
+        )
+        == 1
+    )
+    # DOI-bearing candidates skip fuzzy matching even when a title is similar.
+    assert (
+        review_manager.add_papers(
+            review["id"], search_id, [identified_similar_to_unresolved], "test"
+        )
+        == 1
+    )
+    # Exact normalized unresolved title is now a duplicate.
+    assert (
+        review_manager.add_papers(
+            review["id"],
+            search_id,
+            [{"title": "A DISTINCTIVE clinical-evidence synthesis!!!"}],
+            "test",
+        )
+        == 0
+    )
+
+
+def test_legacy_review_schema_migrates_without_losing_records(caplog):
+    """Old tables gain normalized titles and partial PMID uniqueness in place."""
+    import json
+    import logging
+    import sqlite3
+    import time
+
+    import db
+    import review_manager
+
+    conn = db.get_db()
+    conn.execute("DROP TABLE review_papers")
+    conn.execute("""
+        CREATE TABLE review_papers (
+            id TEXT PRIMARY KEY,
+            review_id TEXT NOT NULL REFERENCES reviews(id),
+            doi TEXT,
+            pmid TEXT,
+            title TEXT NOT NULL,
+            authors TEXT,
+            year INTEGER,
+            source TEXT NOT NULL,
+            search_id TEXT REFERENCES review_searches(id),
+            added_at REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new',
+            metadata TEXT
+        )
+    """)
+    now = time.time()
+    review_id = "legacy-review"
+    conn.execute(
+        "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?)",
+        (review_id, "Legacy", "", now, now, "active"),
+    )
+    legacy_rows = [
+        (
+            "legacy-1",
+            review_id,
+            "",
+            "76543210",
+            "Legacy: Title!",
+            "[]",
+            2018,
+            "pubmed",
+            None,
+            now,
+            "screened_in",
+            json.dumps({"kept": 1}),
+        ),
+        (
+            "legacy-2",
+            review_id,
+            "",
+            "",
+            "Another legacy title",
+            "[]",
+            2019,
+            "manual",
+            None,
+            now,
+            "included",
+            json.dumps({"kept": 2}),
+        ),
+    ]
+    conn.executemany(
+        """INSERT INTO review_papers
+           (id, review_id, doi, pmid, title, authors, year, source, search_id,
+            added_at, status, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        legacy_rows,
+    )
+    conn.commit()
+
+    review_manager._tables_initialized = False
+    with caplog.at_level(logging.WARNING):
+        review_manager._ensure_tables()
+
+    migrated = conn.execute(
+        "SELECT id, normalized_title, status, metadata FROM review_papers ORDER BY id"
+    ).fetchall()
+    assert migrated == [
+        ("legacy-1", "legacy title", "screened_in", json.dumps({"kept": 1})),
+        ("legacy-2", "another legacy title", "included", json.dumps({"kept": 2})),
+    ]
+    indexes = {row[1]: row for row in conn.execute("PRAGMA index_list(review_papers)")}
+    assert indexes["idx_rp_review_pmid_unique"][2] == 1
+    assert indexes["idx_rp_review_pmid_unique"][4] == 1
+    assert "idx_rp_review_normalized_title" in indexes
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO review_papers
+               (id, review_id, doi, pmid, title, normalized_title, authors, year,
+                source, search_id, added_at, status, metadata)
+               VALUES (?, ?, '', ?, ?, ?, '[]', 2020, 'test', NULL, ?, 'new', '{}')""",
+            ("duplicate-pmid", review_id, "76543210", "Other", "other", now),
+        )
+    conn.rollback()
+    assert "Could not create unique" not in caplog.text
 
 
 def test_ensure_tables_warns_on_legacy_duplicate_dois(caplog):

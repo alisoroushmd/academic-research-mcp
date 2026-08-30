@@ -6,4 +6,3 @@ prune docs
 prune .github
 prune .pytest_cache
 prune .ruff_cache
-exclude .DS_Store

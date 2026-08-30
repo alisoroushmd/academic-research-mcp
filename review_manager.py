@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 import db as _db
-from utils import title_similarity
+from utils import normalize_title, title_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ def _ensure_tables():
                 doi TEXT,
                 pmid TEXT,
                 title TEXT NOT NULL,
+                normalized_title TEXT NOT NULL DEFAULT '',
                 authors TEXT,
                 year INTEGER,
                 source TEXT NOT NULL,
@@ -78,20 +79,47 @@ def _ensure_tables():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_rp_status ON review_papers(review_id, status)"
         )
-        # DB-level dedup backstop: the Python duplicate check can't see
-        # concurrent inserts from another server process sharing this DB.
-        # Creation fails on a legacy DB that already holds duplicate DOIs;
-        # in that case dedup falls back to the Python check alone.
-        try:
+        # Additive migration for databases created before normalized-title
+        # storage. Existing records and identifiers are never rewritten or
+        # removed.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(review_papers)")}
+        if "normalized_title" not in columns:
             conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_review_doi_unique "
-                "ON review_papers(review_id, LOWER(doi)) WHERE doi != ''"
+                "ALTER TABLE review_papers "
+                "ADD COLUMN normalized_title TEXT NOT NULL DEFAULT ''"
             )
-        except (sqlite3.IntegrityError, sqlite3.OperationalError) as e:
-            logger.warning(
-                f"Could not create unique (review_id, doi) index — the "
-                f"database already contains duplicate DOIs: {e}"
+        title_rows = conn.execute(
+            "SELECT id, title FROM review_papers "
+            "WHERE normalized_title IS NULL OR normalized_title = ''"
+        ).fetchall()
+        if title_rows:
+            conn.executemany(
+                "UPDATE review_papers SET normalized_title = ? WHERE id = ?",
+                [(normalize_title(title), paper_id) for paper_id, title in title_rows],
             )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rp_review_normalized_title "
+            "ON review_papers(review_id, normalized_title) "
+            "WHERE normalized_title != ''"
+        )
+
+        # DB-level dedup backstops: the Python duplicate check can't see
+        # concurrent inserts from another server process sharing this DB.
+        # A legacy DB may contain duplicates; warn and leave those records
+        # untouched rather than making migration destructive.
+        for identifier, expression in (("doi", "LOWER(doi)"), ("pmid", "pmid")):
+            try:
+                conn.execute(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS "
+                    f"idx_rp_review_{identifier}_unique "
+                    f"ON review_papers(review_id, {expression}) "
+                    f"WHERE {identifier} IS NOT NULL AND {identifier} != ''"
+                )
+            except (sqlite3.IntegrityError, sqlite3.OperationalError) as e:
+                logger.warning(
+                    f"Could not create unique (review_id, {identifier}) index — "
+                    f"the database already contains duplicate {identifier.upper()}s: {e}"
+                )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -230,48 +258,101 @@ def add_papers(
     review_id: str, search_id: str, papers: List[Dict[str, Any]], source: str
 ) -> int:
     _ensure_tables()
-    new_count = 0
     conn = _db.get_db()
     now = time.time()
 
     with _lock:
+        # Load identifier state once per batch. Unresolved titles are fetched
+        # in one query and are the only rows eligible for fuzzy comparison.
+        identifier_rows = conn.execute(
+            "SELECT doi, pmid FROM review_papers WHERE review_id = ?",
+            (review_id,),
+        ).fetchall()
+        existing_dois = {doi.lower() for doi, _ in identifier_rows if doi}
+        existing_pmids = {pmid for _, pmid in identifier_rows if pmid}
+        unresolved_rows = conn.execute(
+            "SELECT normalized_title, title FROM review_papers "
+            "WHERE review_id = ? "
+            "AND COALESCE(doi, '') = '' AND COALESCE(pmid, '') = ''",
+            (review_id,),
+        ).fetchall()
+        unresolved_normalized = {
+            normalized for normalized, _ in unresolved_rows if normalized
+        }
+        unresolved_titles = [title for _, title in unresolved_rows if title]
+
+        insert_rows = []
         for paper in papers:
-            if _is_duplicate(conn, review_id, paper):
-                continue
-            paper_id = str(uuid.uuid4())
             doi = _extract_doi(paper)
-            pmid = paper.get("pmid") or ""
+            pmid = _extract_pmid(paper)
             title = paper.get("title", "") or ""
+            normalized_title = normalize_title(title)
+
+            if doi:
+                if doi.lower() in existing_dois:
+                    continue
+            elif pmid:
+                if pmid in existing_pmids:
+                    continue
+            elif normalized_title:
+                if normalized_title in unresolved_normalized:
+                    continue
+                if any(
+                    title_similarity(title, existing_title) >= 0.85
+                    for existing_title in unresolved_titles
+                ):
+                    continue
+
+            paper_id = str(uuid.uuid4())
             authors = json.dumps(paper.get("authors", []))
             year = paper.get("year")
             metadata = json.dumps(paper)
 
-            # OR IGNORE defers to the unique (review_id, doi) index when a
-            # concurrent process inserted the same DOI after our check above.
-            cursor = conn.execute(
-                """INSERT OR IGNORE INTO review_papers
-                   (id, review_id, doi, pmid, title, authors, year, source, search_id, added_at, status, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+            insert_rows.append(
                 (
                     paper_id,
                     review_id,
                     doi,
                     pmid,
                     title,
+                    normalized_title,
                     authors,
                     year,
                     source,
                     search_id,
                     now,
                     metadata,
-                ),
+                )
             )
-            if cursor.rowcount:
-                new_count += 1
 
-        conn.commit()
-        conn.execute("UPDATE reviews SET updated_at = ? WHERE id = ?", (now, review_id))
-        conn.commit()
+            # Include accepted rows in batch-local state so duplicates within
+            # this same call are skipped before executemany.
+            if doi:
+                existing_dois.add(doi.lower())
+            elif pmid:
+                existing_pmids.add(pmid)
+            elif normalized_title:
+                unresolved_normalized.add(normalized_title)
+                unresolved_titles.append(title)
+
+        try:
+            changes_before = conn.total_changes
+            if insert_rows:
+                conn.executemany(
+                    """INSERT OR IGNORE INTO review_papers
+                       (id, review_id, doi, pmid, title, normalized_title,
+                        authors, year, source, search_id, added_at, status, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+                    insert_rows,
+                )
+            new_count = conn.total_changes - changes_before
+            conn.execute(
+                "UPDATE reviews SET updated_at = ? WHERE id = ?", (now, review_id)
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return new_count
 
 
@@ -289,7 +370,7 @@ def _is_duplicate(conn, review_id: str, paper: Dict[str, Any]) -> bool:
         # new — skip the expensive O(n) title similarity scan.
         return False
 
-    pmid = paper.get("pmid") or ""
+    pmid = _extract_pmid(paper)
     if pmid:
         row = conn.execute(
             "SELECT 1 FROM review_papers WHERE review_id = ? AND pmid = ?",
@@ -300,11 +381,23 @@ def _is_duplicate(conn, review_id: str, paper: Dict[str, Any]) -> bool:
         # PMID also uniquely identifies — skip title scan.
         return False
 
-    # No DOI or PMID: fall back to fuzzy title matching
+    # No DOI or PMID: exact normalized lookup, then fuzzy matching only
+    # against other unresolved records.
     title = paper.get("title", "") or ""
     if title:
+        normalized_title = normalize_title(title)
+        if normalized_title:
+            exact = conn.execute(
+                "SELECT 1 FROM review_papers WHERE review_id = ? "
+                "AND COALESCE(doi, '') = '' AND COALESCE(pmid, '') = '' "
+                "AND normalized_title != '' AND normalized_title = ?",
+                (review_id, normalized_title),
+            ).fetchone()
+            if exact:
+                return True
         existing_titles = conn.execute(
-            "SELECT title FROM review_papers WHERE review_id = ?",
+            "SELECT title FROM review_papers WHERE review_id = ? "
+            "AND COALESCE(doi, '') = '' AND COALESCE(pmid, '') = ''",
             (review_id,),
         ).fetchall()
 
@@ -559,3 +652,9 @@ def _extract_doi(paper: Dict) -> str:
     if doi:
         doi = doi.replace("https://doi.org/", "").strip()
     return doi
+
+
+def _extract_pmid(paper: Dict) -> str:
+    """Extract and normalize a PMID for storage and equality checks."""
+    pmid = paper.get("pmid", "") or ""
+    return str(pmid).strip()

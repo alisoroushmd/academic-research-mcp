@@ -35,9 +35,7 @@ def test_search_papers_pubmed_returns_pagination_dict(tmp_db_dir):
     fake_page = {
         "total_count": 500,
         "query_translation": "cancer[MeSH]",
-        "papers": [
-            {"title": "T", "doi": "10.1000/x", "authors": [], "year": 2024}
-        ],
+        "papers": [{"title": "T", "doi": "10.1000/x", "authors": [], "year": 2024}],
         "offset": 200,
         "returned": 1,
         "has_more": True,
@@ -70,9 +68,7 @@ def test_search_papers_pubmed_num_results_clamped_to_200(tmp_db_dir):
 
 def test_search_papers_negative_offset_clamped_to_zero(tmp_db_dir):
     with patch("pubmed_client.search_pubmed", return_value=_EMPTY_PAGE) as mock_search:
-        asyncio.run(
-            server.search_papers(query="cancer", source="pubmed", offset=-5)
-        )
+        asyncio.run(server.search_papers(query="cancer", source="pubmed", offset=-5))
 
     assert mock_search.call_args[0][2] == 0
 
@@ -83,3 +79,33 @@ def test_delete_review_declares_destructive_hint():
     tool = next(t for t in tools if t.name == "delete_review")
     assert tool.annotations is not None
     assert tool.annotations.destructiveHint is True
+
+
+def test_snowball_search_reports_actual_insert_count_after_race():
+    candidates = [
+        {"doi": "10.1000/one", "title": "One"},
+        {"doi": "10.1000/two", "title": "Two"},
+    ]
+    harvest = {
+        "seed_count": 1,
+        "total_harvested": 2,
+        "duplicates_within_snowball": 0,
+        "candidates": candidates,
+    }
+
+    with (
+        patch("orchestrator.async_harvest_citations", return_value=harvest),
+        patch("review_manager.is_duplicate", return_value=False),
+        patch("review_manager.log_search", return_value="search-id") as log_search,
+        patch("review_manager.add_papers", return_value=1) as add_papers,
+        patch("review_manager.update_search_new_count") as update_count,
+    ):
+        result = asyncio.run(
+            server.snowball_search("review-id", ["seed-id"], direction="forward")
+        )
+
+    assert result["new_candidates_added"] == 1
+    assert result["duplicates_against_review"] == 1
+    assert log_search.call_args.kwargs["new_count"] == 0
+    add_papers.assert_called_once_with("review-id", "search-id", candidates, "snowball")
+    update_count.assert_called_once_with("search-id", 1)

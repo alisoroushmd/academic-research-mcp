@@ -4,9 +4,10 @@ Tests for orchestrator.harvest_citations (snowball harvesting logic).
 Review-level deduplication is tested in test_review_manager.py.
 """
 
-import sys
+import asyncio
 import os
-from unittest.mock import patch
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -143,3 +144,207 @@ def test_harvest_deduplicates_against_review_at_server_level(
 
     # Server-level dedup: verify the candidate IS a duplicate against the review
     assert review_manager.is_duplicate(review["id"], result["candidates"][0])
+
+
+def test_async_harvest_keyed_requests_are_capped_at_ten(monkeypatch):
+    """Authenticated S2 harvests use native async I/O with max concurrency 10."""
+    import orchestrator
+
+    active = 0
+    max_active = 0
+
+    async def fake_fetch(seed_id, num_results):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return [_make_citation(int(seed_id))]
+
+    def sync_must_not_run(*args, **kwargs):
+        raise AssertionError("native async S2 client should be used")
+
+    monkeypatch.setenv("S2_API_KEY", "test-key")
+    monkeypatch.setenv("S2_API_KEY_MIN_INTERVAL_SECONDS", "0")
+    monkeypatch.setattr(orchestrator.s2, "async_get_paper_citations", fake_fetch)
+    monkeypatch.setattr(orchestrator.s2, "get_paper_citations", sync_must_not_run)
+
+    result = asyncio.run(
+        orchestrator.async_harvest_citations(
+            [str(i) for i in range(25)], direction="forward"
+        )
+    )
+
+    assert max_active == 10
+    assert result["total_harvested"] == 25
+
+
+def test_concurrent_harvests_share_the_keyed_provider_limiter(monkeypatch):
+    """Two harvest calls cannot each consume a separate ten-request budget."""
+    import orchestrator
+
+    active = 0
+    max_active = 0
+
+    async def fake_fetch(seed_id, num_results):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return [_make_citation(int(seed_id))]
+
+    monkeypatch.setenv("S2_API_KEY", "test-key")
+    monkeypatch.setenv("S2_API_KEY_MIN_INTERVAL_SECONDS", "0")
+    monkeypatch.setattr(orchestrator.s2, "async_get_paper_citations", fake_fetch)
+
+    async def run_both():
+        return await asyncio.gather(
+            orchestrator.async_harvest_citations(
+                [str(i) for i in range(12)], direction="forward"
+            ),
+            orchestrator.async_harvest_citations(
+                [str(i) for i in range(12, 24)], direction="forward"
+            ),
+        )
+
+    first, second = asyncio.run(run_both())
+
+    assert max_active == 10
+    assert first["total_harvested"] == 12
+    assert second["total_harvested"] == 12
+
+
+def test_async_harvest_anonymous_requests_are_serial_and_paced(monkeypatch):
+    """Anonymous S2 calls permit one in flight and pause one second per call."""
+    import orchestrator
+
+    active = 0
+    max_active = 0
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_fetch(seed_id, num_results):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await real_sleep(0)
+        active -= 1
+        return [_make_citation(int(seed_id))]
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    monkeypatch.setattr(orchestrator.s2, "async_get_paper_citations", fake_fetch)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        orchestrator.async_harvest_citations(["1", "2", "3"], direction="forward")
+    )
+
+    assert max_active == 1
+    assert len(sleeps) == 2
+    assert all(0 < delay <= 1.0 for delay in sleeps)
+    assert result["total_harvested"] == 3
+
+
+def test_sync_and_async_related_calls_share_canonical_cache_key(
+    monkeypatch, tmp_db_dir
+):
+    import cache
+    import semantic_scholar_client as s2
+
+    cache._tables_created = False
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"data": []}
+    monkeypatch.setattr(s2.http_client, "get", lambda *a, **k: response)
+
+    assert s2.get_paper_citations("seed", num_results=100) == []
+
+    async def network_must_not_run(*args, **kwargs):
+        raise AssertionError("async call should reuse the sync cache entry")
+
+    monkeypatch.setattr(s2.http_client, "async_get", network_must_not_run)
+    assert asyncio.run(s2.async_get_paper_citations("seed", 100)) == []
+
+
+def test_many_cached_harvest_edges_bypass_limiter_and_provider(monkeypatch, tmp_db_dir):
+    import cache
+    import orchestrator
+
+    cache._tables_created = False
+    seeds = [str(i) for i in range(25)]
+    for seed_id in seeds:
+        cache.put(
+            orchestrator.s2._related_cache_key("citations", seed_id, 100),
+            [_make_citation(int(seed_id))],
+            category="citations",
+            ttl=cache.SEARCH_TTL,
+        )
+
+    limiter_calls = 0
+    provider_calls = 0
+
+    class CountingLimiter:
+        async def run(self, awaitable_factory):
+            nonlocal limiter_calls
+            limiter_calls += 1
+            return await awaitable_factory()
+
+    async def counting_provider(seed_id, num_results):
+        nonlocal provider_calls
+        provider_calls += 1
+        return []
+
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    monkeypatch.setattr(
+        orchestrator, "_get_s2_harvest_limiter", lambda has_key: CountingLimiter()
+    )
+    monkeypatch.setattr(orchestrator.s2, "async_get_paper_citations", counting_provider)
+
+    result = asyncio.run(
+        orchestrator.async_harvest_citations(seeds, direction="forward")
+    )
+
+    assert limiter_calls == 0
+    assert provider_calls == 0
+    assert result["total_harvested"] == 25
+
+
+def test_identical_concurrent_edges_use_one_flight_and_no_duplicate_pacing(
+    monkeypatch, tmp_db_dir
+):
+    import asyncio as asyncio_module
+
+    import cache
+    import orchestrator
+
+    cache._tables_created = False
+    provider_calls = 0
+    pacing_sleeps = []
+    real_sleep = asyncio_module.sleep
+
+    async def fake_provider(seed_id, num_results):
+        nonlocal provider_calls
+        provider_calls += 1
+        await real_sleep(0)
+        return [_make_citation(1)]
+
+    async def counting_sleep(delay):
+        pacing_sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    monkeypatch.setattr(orchestrator.s2, "async_get_paper_citations", fake_provider)
+    monkeypatch.setattr(asyncio_module, "sleep", counting_sleep)
+
+    result = asyncio.run(
+        orchestrator.async_harvest_citations(["same-seed"] * 5, direction="forward")
+    )
+
+    assert provider_calls == 1
+    assert pacing_sleeps == []
+    assert result["total_harvested"] == 5

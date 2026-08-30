@@ -1114,17 +1114,22 @@ async def snowball_search(
             query=_json.dumps(seed_paper_ids),
             filters={"direction": direction},
             raw_count=harvest["total_harvested"],
-            new_count=len(new_papers),
+            new_count=0,
         )
+        inserted_count = 0
         if new_papers:
-            review_manager.add_papers(review_id, search_id, new_papers, "snowball")
+            inserted_count = review_manager.add_papers(
+                review_id, search_id, new_papers, "snowball"
+            )
+        review_manager.update_search_new_count(search_id, inserted_count)
+        duplicates_against_review += len(new_papers) - inserted_count
 
         return {
             "seed_count": harvest["seed_count"],
             "total_harvested": harvest["total_harvested"],
             "duplicates_within_snowball": harvest["duplicates_within_snowball"],
             "duplicates_against_review": duplicates_against_review,
-            "new_candidates_added": len(new_papers),
+            "new_candidates_added": inserted_count,
             "search_id": search_id,
         }
     except Exception as e:
@@ -1176,6 +1181,7 @@ async def prisma_counts(review_id: str) -> Dict[str, Any]:
 
 
 # ============================================================================
+
 
 def main():
     import os
