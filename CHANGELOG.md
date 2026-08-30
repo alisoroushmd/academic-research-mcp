@@ -37,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Semantic Scholar DOI/PMID identifiers retain their namespace colon in URL paths.** All paper-detail, citation, reference, async edge, and recommendation requests now encode the identifier payload while preserving prefixes such as `DOI:` and `PMID:`, preventing prefixed lookups from being rejected as unknown paper IDs. (`semantic_scholar_client.py`, `tests/test_semantic_scholar_client.py`)
+
 - **Packaging metadata now builds without setuptools deprecation or redundant manifest warnings.** The project uses an SPDX license expression with a compatible setuptools build floor, removes the deprecated license classifier, and drops a redundant `.DS_Store` exclusion. (`pyproject.toml`, `MANIFEST.in`)
 
 - **`open_access` failure modes are now self-diagnosing.** Previously a missing/placeholder `OPENALEX_EMAIL`, an empty/invalid DOI, and a DOI genuinely absent from Unpaywall all collapsed into an indistinguishable `is_oa=False` / empty `pdf_url` (especially in batch mode, where `batch_check_oa` silently discarded the underlying `error`). This made a config problem look like a global "nothing is open access" outage. Each result now carries an `error_type` (`config` / `invalid_doi` / `not_in_unpaywall` / `api_error`), config problems also set `config_issue: True`, and placeholder emails (`example.com`, `your-email`, `changeme`, …) plus malformed addresses and Unpaywall `422` responses are detected and reported with an actionable message. (`unpaywall_client.py`, `tests/test_unpaywall_client.py`)
