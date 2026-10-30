@@ -9,12 +9,20 @@ for higher rate limits (1 request/second with key).
 Set the environment variable S2_API_KEY to use an API key.
 """
 
+import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 import http_client
 import cache
 
+logger = logging.getLogger(__name__)
+
 S2_API_BASE = "https://api.semanticscholar.org/graph/v1"
+
+# Set once S2 answers 403 to a keyed request. A revoked or expired key makes
+# every endpoint return 403, while keyless requests still work at the shared
+# public rate limit, so the rest of the process runs without the key.
+_key_rejected = False
 
 
 def _quote_paper_id(paper_id: str) -> str:
@@ -23,12 +31,52 @@ def _quote_paper_id(paper_id: str) -> str:
 
 
 def _headers() -> Dict[str, str]:
-    """Build request headers, including API key if available."""
+    """Build request headers, including API key if available and not rejected."""
     h = {"Accept": "application/json"}
     key = http_client.get_env("S2_API_KEY")
-    if key:
+    if key and not _key_rejected:
         h["x-api-key"] = key
     return h
+
+
+def _key_was_rejected(resp, headers: Dict[str, str]) -> bool:
+    """Record a 403 on a keyed request and report whether to retry keyless."""
+    global _key_rejected
+    if resp.status_code != 403 or "x-api-key" not in headers:
+        return False
+    _key_rejected = True
+    logger.warning(
+        "Semantic Scholar rejected S2_API_KEY (HTTP 403); continuing without "
+        "a key at the public rate limit. Replace the key and restart the server."
+    )
+    return True
+
+
+def _get(url: str, **kwargs):
+    headers = _headers()
+    resp = http_client.get(url, headers=headers, **kwargs)
+    if _key_was_rejected(resp, headers):
+        resp = http_client.get(url, headers=_headers(), **kwargs)
+    http_client.raise_for_status_sanitized(resp)
+    return resp
+
+
+def _post(url: str, **kwargs):
+    headers = _headers()
+    resp = http_client.post(url, headers=headers, **kwargs)
+    if _key_was_rejected(resp, headers):
+        resp = http_client.post(url, headers=_headers(), **kwargs)
+    http_client.raise_for_status_sanitized(resp)
+    return resp
+
+
+async def _async_get(url: str, **kwargs):
+    headers = _headers()
+    resp = await http_client.async_get(url, headers=headers, **kwargs)
+    if _key_was_rejected(resp, headers):
+        resp = await http_client.async_get(url, headers=_headers(), **kwargs)
+    http_client.raise_for_status_sanitized(resp)
+    return resp
 
 
 def search_papers(
@@ -73,8 +121,7 @@ def search_papers(
     if cached is not None:
         return cached
 
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     papers = [_format_paper(item) for item in data.get("data", [])]
@@ -104,8 +151,7 @@ def get_paper_details(paper_id: str) -> Dict[str, Any]:
     if cached is not None:
         return cached
 
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     paper = _format_paper(data)
@@ -154,8 +200,7 @@ def get_paper_citations(paper_id: str, num_results: int = 20) -> List[Dict[str, 
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     papers = [
@@ -186,8 +231,7 @@ def get_paper_references(paper_id: str, num_results: int = 20) -> List[Dict[str,
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     papers = [
@@ -228,8 +272,7 @@ async def _async_get_related_papers(
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds",
     }
-    resp = await http_client.async_get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = await _async_get(url, params=params)
     data = resp.json()
     edge_key = "citingPaper" if relation == "citations" else "citedPaper"
     papers = [_format_paper(item.get(edge_key, {})) for item in data.get("data", [])]
@@ -266,8 +309,7 @@ def get_author_details(author_id: str) -> Dict[str, Any]:
     params = {
         "fields": "name,affiliations,homepage,paperCount,citationCount,hIndex",
     }
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     author = {
@@ -301,8 +343,7 @@ def search_authors(query: str, num_results: int = 5) -> List[Dict[str, Any]]:
         "limit": min(num_results, 100),
         "fields": "name,affiliations,paperCount,citationCount,hIndex",
     }
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     authors = []
@@ -337,8 +378,7 @@ def get_author_papers(author_id: str, num_results: int = 20) -> List[Dict[str, A
         "limit": min(num_results, 100),
         "fields": "title,year,citationCount,venue,externalIds,influentialCitationCount",
     }
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     return [_format_paper(item) for item in data.get("data", [])]
@@ -365,8 +405,7 @@ def get_recommended_papers(
         "limit": min(num_results, 100),
         "fields": "title,authors,year,citationCount,venue,externalIds,abstract",
     }
-    resp = http_client.get(url, headers=_headers(), params=params)
-    http_client.raise_for_status_sanitized(resp)
+    resp = _get(url, params=params)
     data = resp.json()
 
     return [_format_paper(item) for item in data.get("recommendedPapers", [])]
@@ -429,13 +468,7 @@ def batch_get_papers(
     results = []
     for i in range(0, len(paper_ids), 500):
         chunk = paper_ids[i : i + 500]
-        resp = http_client.post(
-            url,
-            headers=_headers(),
-            params=params,
-            json={"ids": chunk},
-        )
-        http_client.raise_for_status_sanitized(resp)
+        resp = _post(url, params=params, json={"ids": chunk})
         batch = resp.json()
 
         for item in batch:

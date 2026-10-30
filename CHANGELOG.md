@@ -5,6 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tests/test_dxt_bundle.py` guards the built bundle against manifest drift.** The `.dxt` is a generated artifact committed next to its source and has silently drifted before — a committed bundle predated the `crossref_email` field, so one-click installs never offered it, and nothing caught it because the two are only compared by rebuilding. The test asserts the manifest inside the bundle is byte-identical to `dxt/manifest.json`, that every `${user_config.X}` env reference is declared, that both API-key fields stay `sensitive`, and that the two polite-pool email fields stay visible. Recovered from a divergent clone of this repo that was never pushed. (`tests/test_dxt_bundle.py`)
+
+### Fixed
+
+- **A rejected `S2_API_KEY` no longer breaks every Semantic Scholar tool.** A revoked or expired key makes S2 answer HTTP 403 on all endpoints, so `batch_get_papers`, `get_paper_network`, S2 author search, and snowballing all failed while keyless requests would have succeeded. The first 403 on a keyed request now logs a warning, retries without the key, and stops sending it for the rest of the process; a 403 on a keyless request is still raised. (`semantic_scholar_client.py`, `tests/test_semantic_scholar_client.py`)
+
 ## [0.2.0] - 2026-08-29
 
 ### Added
